@@ -742,6 +742,23 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _adb_candidates(self) -> list[str]:
+        candidates: list[str] = []
+        if self.repository is not None:
+            saved = self.repository.get_setting("adb_path")
+            if saved and Path(saved).is_file():
+                candidates.append(saved)
+        candidates.extend(discover_adb())
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            key = str(Path(candidate)).casefold()
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+        return unique
+
     def connect_mumu(self) -> None:
         if self.demo_mode:
             QMessageBox.information(self, "演示模式", "请用普通模式启动后再连接 MuMu。")
@@ -749,7 +766,7 @@ class MainWindow(QMainWindow):
         if self._task_running():
             QMessageBox.information(self, "任务运行中", "请先停止当前任务。")
             return
-        candidates = discover_adb()
+        candidates = self._adb_candidates()
         if not candidates:
             filename, _ = QFileDialog.getOpenFileName(
                 self, "选择 MuMu 的 adb.exe", "", "adb.exe (adb.exe)"
@@ -779,6 +796,8 @@ class MainWindow(QMainWindow):
             png = adb.screenshot()
             self.runtime = OcrMumuRuntime(adb, VisionService(RapidOcrEngine()))
             self.dashboard.set_screenshot(png)
+            if self.repository is not None:
+                self.repository.set_setting("adb_path", candidates[0])
             self.connection.setText(f"● 已连接 {preferred}")
             self.connection.setStyleSheet("color:#65D6A0")
             self.add_log(f"已连接 MuMu 设备 {preferred}，截图校验成功。")

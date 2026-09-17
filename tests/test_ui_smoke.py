@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -94,6 +96,97 @@ class UiSmokeTests(unittest.TestCase):
             self.assertEqual(["real-001"], [item.id for item in state.inventory])
         finally:
             repository.close()
+
+    def test_connect_prefers_saved_adb_path_without_file_picker(self):
+        class SuccessfulAdbClient:
+            executables: list[str] = []
+
+            def __init__(self, executable: str, serial: str | None = None):
+                self.executables.append(executable)
+                self.serial = serial
+
+            @staticmethod
+            def devices():
+                return ["127.0.0.1:16384"]
+
+            @staticmethod
+            def screenshot():
+                return b"png"
+
+        repository = AppRepository(":memory:")
+        with tempfile.TemporaryDirectory() as folder:
+            saved_adb = Path(folder) / "adb.exe"
+            saved_adb.touch()
+            repository.set_setting("adb_path", str(saved_adb))
+            window = MainWindow(
+                load_initial_state(repository, demo_mode=False),
+                demo_mode=False,
+                repository=repository,
+            )
+            try:
+                with (
+                    patch("yys_helper.ui.main_window.discover_adb", return_value=[]),
+                    patch("yys_helper.ui.main_window.AdbClient", SuccessfulAdbClient),
+                    patch("yys_helper.ui.main_window.RapidOcrEngine"),
+                    patch("yys_helper.ui.main_window.OcrMumuRuntime"),
+                    patch.object(window.dashboard, "set_screenshot"),
+                    patch(
+                        "yys_helper.ui.main_window.QFileDialog.getOpenFileName"
+                    ) as file_picker,
+                ):
+                    window.connect_mumu()
+
+                file_picker.assert_not_called()
+                self.assertEqual(str(saved_adb), SuccessfulAdbClient.executables[0])
+                self.assertEqual(str(saved_adb), repository.get_setting("adb_path"))
+            finally:
+                window.close()
+                repository.close()
+
+    def test_connect_remembers_manually_selected_adb_path(self):
+        class SuccessfulAdbClient:
+            def __init__(self, executable: str, serial: str | None = None):
+                self.executable = executable
+                self.serial = serial
+
+            @staticmethod
+            def devices():
+                return ["127.0.0.1:16384"]
+
+            @staticmethod
+            def screenshot():
+                return b"png"
+
+        repository = AppRepository(":memory:")
+        with tempfile.TemporaryDirectory() as folder:
+            selected_adb = Path(folder) / "adb.exe"
+            selected_adb.touch()
+            window = MainWindow(
+                load_initial_state(repository, demo_mode=False),
+                demo_mode=False,
+                repository=repository,
+            )
+            try:
+                with (
+                    patch("yys_helper.ui.main_window.discover_adb", return_value=[]),
+                    patch("yys_helper.ui.main_window.AdbClient", SuccessfulAdbClient),
+                    patch("yys_helper.ui.main_window.RapidOcrEngine"),
+                    patch("yys_helper.ui.main_window.OcrMumuRuntime"),
+                    patch.object(window.dashboard, "set_screenshot"),
+                    patch(
+                        "yys_helper.ui.main_window.QFileDialog.getOpenFileName",
+                        return_value=(str(selected_adb), ""),
+                    ) as file_picker,
+                ):
+                    window.connect_mumu()
+
+                file_picker.assert_called_once()
+                self.assertEqual(
+                    str(selected_adb), repository.get_setting("adb_path")
+                )
+            finally:
+                window.close()
+                repository.close()
 
     def test_selecting_a_record_loads_its_slot_and_rarity_for_update(self):
         repository = AppRepository(":memory:")

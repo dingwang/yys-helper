@@ -28,11 +28,11 @@
 - Python 3.11+。
 - PySide6 Qt Widgets 构建 Windows 桌面界面；后台工作放入线程，UI 线程只负责渲染和信号处理。
 - 通过 MuMu 自带或用户指定的 `adb.exe` 获取截图与发送点击/滑动/文本输入。
-- OpenCV 完成模板与图像区域识别，RapidOCR + ONNX Runtime 完成中文文字识别。
+- OpenCV 完成模板与图像区域识别，RapidOCR + MNN 完成中文文字识别。MNN 避免依赖系统级 ONNX Runtime DLL，安装后首次初始化会下载官方中文模型。
 - SQLite 保存设置、任务运行记录、御魂快照、方案和操作审计；不上传账号或截图。
 - 领域层保持纯 Python，使评分、组合求解、安全策略和状态机能在无模拟器环境下完整测试。
 
-依赖选择依据：Qt 官方将 PySide6 作为 Qt 6 的 Python 官方绑定；RapidOCR 当前推荐统一的 `rapidocr` 包，并推荐 CPU 使用 ONNX Runtime。游戏自身支持从御魂整理界面导入方案码，近期阵容方案也包含 `|TA|...` 形式的文字码。
+依赖选择依据：Qt 官方将 PySide6 作为 Qt 6 的 Python 官方绑定；RapidOCR 当前推荐统一的 `rapidocr` 包，并官方支持 MNN CPU 推理后端。游戏自身支持从御魂整理界面导入方案码，近期阵容方案也包含 `|TA|...` 形式的文字码。
 
 ## 模块边界
 

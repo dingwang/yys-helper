@@ -18,7 +18,9 @@ class WorkflowTests(unittest.TestCase):
 
     def test_stamina_empty_stops_without_tapping(self):
         actor = RecordingActor()
-        result = AutomationEngine(FakeObserver(["stamina_empty"]), actor).run(
+        result = AutomationEngine(
+            FakeObserver(["stamina_empty"]), actor, sleeper=lambda _seconds: None
+        ).run(
             soul_dungeon_workflow(), TaskLimits()
         )
         self.assertEqual(StopReason.INSUFFICIENT_STAMINA, result.reason)
@@ -27,7 +29,9 @@ class WorkflowTests(unittest.TestCase):
     def test_chapter_28_stops_at_round_limit(self):
         scenes = ["explore_map", "battle", "settlement", "explore_map"]
         actor = RecordingActor()
-        result = AutomationEngine(FakeObserver(scenes), actor).run(
+        result = AutomationEngine(
+            FakeObserver(scenes), actor, sleeper=lambda _seconds: None
+        ).run(
             chapter_28_workflow(), TaskLimits(max_rounds=1)
         )
         self.assertEqual(StopReason.MAX_ROUNDS, result.reason)

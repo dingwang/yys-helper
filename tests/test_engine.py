@@ -69,6 +69,25 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(StopReason.CANCELLED, result.reason)
         self.assertEqual([], actor.actions)
 
+    def test_transition_uses_configured_poll_delay(self):
+        delays = []
+        workflow = Workflow(
+            name="paced",
+            transitions={
+                "explore_map": Transition(
+                    "tap_monster", ("battle",), poll_delay_seconds=1.25
+                )
+            },
+            terminal_scenes=frozenset({"battle"}),
+        )
+        engine = AutomationEngine(
+            FakeObserver(["explore_map", "battle"]),
+            RecordingActor(),
+            sleeper=delays.append,
+        )
+        engine.run(workflow, TaskLimits())
+        self.assertEqual([1.25], delays)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,14 @@ class AdbTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.tap(-1, 20)
 
+    def test_connect_uses_global_adb_command_and_accepts_already_connected(self):
+        runner = RecordingRunner(stdout=b"already connected to 127.0.0.1:16384\n")
+        client = AdbClient("adb.exe", runner=runner)
+        self.assertTrue(client.connect("127.0.0.1:16384"))
+        self.assertEqual(
+            ("adb.exe", "connect", "127.0.0.1:16384"), runner.calls[0][0]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

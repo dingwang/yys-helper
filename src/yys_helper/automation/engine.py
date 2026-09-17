@@ -21,6 +21,7 @@ class Transition:
     action: str
     expected_scenes: tuple[str, ...]
     round_completed: bool = False
+    poll_delay_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,10 +56,12 @@ class AutomationEngine:
         actor: ActionActor,
         *,
         clock=time.monotonic,
+        sleeper=time.sleep,
     ) -> None:
         self.observer = observer
         self.actor = actor
         self.clock = clock
+        self.sleeper = sleeper
 
     def run(
         self,
@@ -123,6 +126,8 @@ class AutomationEngine:
                     self.clock() - started,
                     transition.action,
                 )
+            if transition.poll_delay_seconds > 0:
+                self.sleeper(transition.poll_delay_seconds)
             expected_scenes = transition.expected_scenes
             if transition.round_completed:
                 rounds += 1

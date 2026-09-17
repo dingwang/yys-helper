@@ -1,12 +1,12 @@
 # 阴阳师助手 MVP Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 构建一个可运行、可测试的 Windows 图形助手，通过 MuMu ADB 完成御魂方案配装、缺口强化规划及困 28/御魂副本自动循环。
 
 **Architecture:** 纯 Python 领域层负责评分、组合优化和安全规则；基础设施层封装 ADB、OCR 与 SQLite；可取消状态机在执行每个输入动作前后验证场景。PySide6 页面只消费应用服务，耗时任务放入后台线程。
 
-**Tech Stack:** Python 3.11+、PySide6、OpenCV、RapidOCR、ONNX Runtime、SQLite、`unittest`
+**Tech Stack:** Python 3.11+、PySide6、OpenCV、RapidOCR、MNN、SQLite、`unittest`
 
 **Spec:** `docs/superpowers/specs/2026-09-18-yys-helper-design.md`
 
@@ -31,7 +31,7 @@
 **Interfaces:**
 - Produces: `Soul`, `Stat`, `BuildRequirement`, `BuildResult`, `UpgradeBudget`, `StopReason`。
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_soul_rejects_slot_outside_one_to_six(self):
@@ -40,16 +40,16 @@ def test_soul_rejects_slot_outside_one_to_six(self):
              main_stat=Stat.SPEED, main_value=57, substats={})
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `python -m unittest tests.test_models -v`
 Expected: FAIL because the model module does not exist.
 
-- [ ] **Step 3: Implement frozen validated dataclasses and enums**
+- [x] **Step 3: Implement frozen validated dataclasses and enums**
 
 `Stat` is a string enum; slots accept `1..6`, rarity `1..6`, level `0..15`, confidence `0..1`, and budget fields reject negative values.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 Run: `python -m unittest tests.test_models -v`
 Expected: PASS.
@@ -71,7 +71,7 @@ Commit: `feat: add project foundation and soul models`
 - Consumes: Task 1 models.
 - Produces: `score_soul`, `protection_reasons`, `optimize_build`, `rank_upgrade_candidates`。
 
-- [ ] **Step 1: Write scoring/protection tests and verify RED**
+- [x] **Step 1: Write scoring/protection tests and verify RED**
 
 ```python
 def test_equipped_soul_is_always_protected(self):
@@ -82,12 +82,12 @@ def test_equipped_soul_is_always_protected(self):
 Run: `python -m unittest tests.test_scoring -v`
 Expected: FAIL because scoring and safety modules are missing.
 
-- [ ] **Step 2: Implement profile scoring and immutable protection reasons; verify GREEN**
+- [x] **Step 2: Implement profile scoring and immutable protection reasons; verify GREEN**
 
 Run: `python -m unittest tests.test_scoring -v`
 Expected: PASS for speed priority, useful-stat counts, equipped, locked, referenced and low-confidence cases.
 
-- [ ] **Step 3: Write optimizer tests and verify RED**
+- [x] **Step 3: Write optimizer tests and verify RED**
 
 ```python
 def test_optimizer_returns_closest_build_when_strict_solution_missing(self):
@@ -100,14 +100,14 @@ def test_optimizer_returns_closest_build_when_strict_solution_missing(self):
 Run: `python -m unittest tests.test_optimizer -v`
 Expected: FAIL because optimizer is missing.
 
-- [ ] **Step 4: Implement bounded search and verify GREEN**
+- [x] **Step 4: Implement bounded search and verify GREEN**
 
 Keep top 20 eligible candidates per slot, enumerate six slots, enforce set counts/main stats, prune by optimistic score, and rank near-solutions by normalized shortfall.
 
 Run: `python -m unittest tests.test_optimizer -v`
 Expected: PASS.
 
-- [ ] **Step 5: Write upgrade tests, implement `+3` ranking, verify GREEN and commit**
+- [x] **Step 5: Write upgrade tests, implement `+3` ranking, verify GREEN and commit**
 
 ```python
 def test_upgrade_planner_prefers_relevant_low_level_embryo(self):
@@ -134,7 +134,7 @@ Commit: `feat: add soul scoring optimization and upgrade planning`
 **Interfaces:**
 - Produces: `AdbClient`, `VisionService`, `AppRepository`。
 
-- [ ] **Step 1: Write ADB contract tests and verify RED**
+- [x] **Step 1: Write ADB contract tests and verify RED**
 
 ```python
 def test_screenshot_targets_selected_serial(self):
@@ -147,12 +147,12 @@ def test_screenshot_targets_selected_serial(self):
 Run: `python -m unittest tests.test_adb -v`
 Expected: FAIL because ADB wrapper is missing.
 
-- [ ] **Step 2: Implement discovery/devices/screenshot/tap/swipe/text with timeouts; verify GREEN**
+- [x] **Step 2: Implement discovery/devices/screenshot/tap/swipe/text with timeouts; verify GREEN**
 
 Run: `python -m unittest tests.test_adb -v`
 Expected: PASS, including timeout and malformed PNG cases.
 
-- [ ] **Step 3: Write vision tests, implement lazy OCR adapter, verify GREEN**
+- [x] **Step 3: Write vision tests, implement lazy OCR adapter, verify GREEN**
 
 ```python
 def test_find_text_rejects_low_confidence(self):
@@ -163,7 +163,7 @@ def test_find_text_rejects_low_confidence(self):
 Run before and after: `python -m unittest tests.test_vision -v`
 Expected: first FAIL, then PASS without importing native packages in tests.
 
-- [ ] **Step 4: Write SQLite round-trip test, implement schema, verify GREEN and commit**
+- [x] **Step 4: Write SQLite round-trip test, implement schema, verify GREEN and commit**
 
 Run before and after: `python -m unittest tests.test_repository -v`
 Expected: first FAIL, then PASS for souls, settings and audit events.
@@ -181,7 +181,7 @@ Commit: `feat: integrate MuMu ADB vision and local storage`
 **Interfaces:**
 - Produces: `AutomationEngine.run`, `chapter_28_workflow`, `soul_dungeon_workflow`。
 
-- [ ] **Step 1: Write state/guard tests and verify RED**
+- [x] **Step 1: Write state/guard tests and verify RED**
 
 ```python
 def test_three_unknown_scenes_stop_without_input(self):
@@ -194,12 +194,12 @@ def test_three_unknown_scenes_stop_without_input(self):
 Run: `python -m unittest tests.test_engine -v`
 Expected: FAIL because engine is missing.
 
-- [ ] **Step 2: Implement cancellation, limits and verified transitions; verify GREEN**
+- [x] **Step 2: Implement cancellation, limits and verified transitions; verify GREEN**
 
 Run: `python -m unittest tests.test_engine -v`
 Expected: PASS for cancellation, unknown scenes, stamina, max rounds and max duration.
 
-- [ ] **Step 3: Write workflow graph tests, implement both graphs, verify GREEN and commit**
+- [x] **Step 3: Write workflow graph tests, implement both graphs, verify GREEN and commit**
 
 ```python
 def test_chapter_28_returns_to_map_after_settlement(self):
@@ -222,7 +222,7 @@ Commit: `feat: add guarded daily automation workflows`
 **Interfaces:**
 - Produces: `normalize_scheme_code`, `SchemeService`, `SoulService.upgrade_and_replan`。
 
-- [ ] **Step 1: Write scheme validation tests and verify RED**
+- [x] **Step 1: Write scheme validation tests and verify RED**
 
 ```python
 def test_normalizes_ta_code(self):
@@ -236,12 +236,12 @@ def test_rejects_shell_metacharacters(self):
 Run: `python -m unittest tests.test_schemes -v`
 Expected: FAIL because scheme service is missing.
 
-- [ ] **Step 2: Implement safe text/QR import contract and verify GREEN**
+- [x] **Step 2: Implement safe text/QR import contract and verify GREEN**
 
 Run: `python -m unittest tests.test_schemes -v`
 Expected: PASS; codes are always passed as subprocess data arguments.
 
-- [ ] **Step 3: Write staged-upgrade orchestration test and verify RED**
+- [x] **Step 3: Write staged-upgrade orchestration test and verify RED**
 
 ```python
 def test_rescans_at_plus_three_and_stops_after_bad_roll(self):
@@ -253,7 +253,7 @@ def test_rescans_at_plus_three_and_stops_after_bad_roll(self):
 Run: `python -m unittest tests.test_soul_service -v`
 Expected: FAIL because orchestration is missing.
 
-- [ ] **Step 4: Implement scan/plan/mark/upgrade/replan; verify GREEN and commit**
+- [x] **Step 4: Implement scan/plan/mark/upgrade/replan; verify GREEN and commit**
 
 Run: `python -m unittest tests.test_soul_service -v`
 Expected: PASS, including protected-item and exhausted-budget cases.
@@ -276,7 +276,7 @@ Commit: `feat: orchestrate scheme builds and staged soul upgrades`
 - Consumes: Tasks 2-5.
 - Produces: `python -m yys_helper` and `python -m yys_helper --demo`。
 
-- [ ] **Step 1: Write demo journey test and verify RED**
+- [x] **Step 1: Write demo journey test and verify RED**
 
 ```python
 def test_demo_contains_inventory_build_and_upgrade_candidate(self):
@@ -289,20 +289,20 @@ def test_demo_contains_inventory_build_and_upgrade_candidate(self):
 Run: `python -m unittest tests.test_demo -v`
 Expected: FAIL because demo module is missing.
 
-- [ ] **Step 2: Implement deterministic demo data and verify GREEN**
+- [x] **Step 2: Implement deterministic demo data and verify GREEN**
 
 Run: `python -m unittest tests.test_demo -v`
 Expected: PASS.
 
-- [ ] **Step 3: Implement UI and startup scripts**
+- [x] **Step 3: Implement UI and startup scripts**
 
 Use a dark indigo/gold theme, 220px navigation rail, five pages, persistent logs, red emergency-stop button and F12 shortcut. Import PySide6 only in `ui/`.
 
-- [ ] **Step 4: Document setup, MuMu connection, scheme workflow, budgets, protection and risk**
+- [x] **Step 4: Document setup, MuMu connection, scheme workflow, budgets, protection and risk**
 
 `setup.ps1` creates `.venv` and installs `.[desktop]`; `start.ps1` validates the environment and forwards `--demo`.
 
-- [ ] **Step 5: Run final verification and commit**
+- [x] **Step 5: Run final verification and commit**
 
 Run: `python -m unittest discover -s tests -v`
 Expected: zero failures/errors.

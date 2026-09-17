@@ -59,10 +59,16 @@ class RapidOcrEngine:
     def _load(self):
         if self._engine is None:
             try:
-                from rapidocr import RapidOCR
+                from rapidocr import EngineType, RapidOCR
             except ImportError as exc:
                 raise RuntimeError("请先安装 desktop 依赖：pip install -e .[desktop]") from exc
-            self._engine = RapidOCR()
+            self._engine = RapidOCR(
+                params={
+                    "Det.engine_type": EngineType.MNN,
+                    "Cls.engine_type": EngineType.MNN,
+                    "Rec.engine_type": EngineType.MNN,
+                }
+            )
         return self._engine
 
     def read(self, image: Any) -> list[OcrBox]:

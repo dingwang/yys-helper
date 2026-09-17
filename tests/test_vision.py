@@ -1,6 +1,13 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from yys_helper.infrastructure.vision import OcrBox, VisionService, normalized_to_pixels
+from yys_helper.infrastructure.vision import (
+    OcrBox,
+    RapidOcrEngine,
+    VisionService,
+    normalized_to_pixels,
+)
 
 
 class FakeOcr:
@@ -33,6 +40,28 @@ class VisionTests(unittest.TestCase):
             )
         )
         self.assertEqual((20, 20, 40, 40), vision.find_text(object(), "挑战").bounds)
+
+    def test_rapidocr_adapter_selects_mnn_for_all_stages(self):
+        captured = {}
+
+        class FakeRapidOCR:
+            def __init__(self, *, params):
+                captured.update(params)
+
+        fake_module = SimpleNamespace(
+            RapidOCR=FakeRapidOCR,
+            EngineType=SimpleNamespace(MNN="mnn"),
+        )
+        with patch.dict("sys.modules", {"rapidocr": fake_module}):
+            RapidOcrEngine()._load()
+        self.assertEqual(
+            {
+                "Det.engine_type": "mnn",
+                "Cls.engine_type": "mnn",
+                "Rec.engine_type": "mnn",
+            },
+            captured,
+        )
 
 
 if __name__ == "__main__":

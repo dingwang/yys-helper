@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -86,6 +87,15 @@ class AdbClient:
             if len(parts) >= 2 and parts[1] == "device":
                 ready.append(parts[0])
         return ready
+
+    def connect(self, endpoint: str) -> bool:
+        match = re.fullmatch(r"(?:127\.0\.0\.1|localhost):(\d{1,5})", endpoint)
+        if match is None or not 1 <= int(match.group(1)) <= 65535:
+            raise ValueError("ADB endpoint must be a local host and valid port")
+        output = self._run("connect", endpoint, serial=False).decode(
+            "utf-8", errors="replace"
+        )
+        return "connected to" in output.lower()
 
     def screenshot(self) -> bytes:
         if not self.serial:

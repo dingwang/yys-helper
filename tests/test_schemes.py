@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from yys_helper.application.schemes import (
+    decode_qr_scheme,
     InvalidSchemeCode,
     SchemeService,
     normalize_scheme_code,
@@ -43,6 +44,19 @@ class SchemeTests(unittest.TestCase):
             path.write_bytes(b"fake image")
             self.assertTrue(SchemeService(actor).import_qr(path))
             self.assertEqual([path.resolve()], actor.qr_paths)
+
+    def test_qr_decoder_normalizes_embedded_text_code(self):
+        class FakeDecoder:
+            def detectAndDecode(self, _image):
+                return "  |TA|abc123\n", object(), object()
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "scheme.png"
+            path.write_bytes(b"fake image")
+            self.assertEqual(
+                "|TA|abc123",
+                decode_qr_scheme(path, decoder=FakeDecoder(), image=object()),
+            )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+data/
+logs/
+*.db
+*.sqlite3
+*.png
+!assets/**/*.png
+.git-codex-init-backup/

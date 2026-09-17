@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yys-helper"
+version = "0.1.0"
+description = "A safe, local MuMu assistant for Onmyoji soul planning and daily workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "dingwang" }]
+dependencies = []
+
+[project.optional-dependencies]
+desktop = [
+  "PySide6>=6.8,<7",
+  "opencv-python-headless>=4.10,<5",
+  "rapidocr>=3.4,<4",
+  "onnxruntime>=1.20,<2",
+  "Pillow>=10,<13",
+]
+
+[project.scripts]
+yys-helper = "yys_helper.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -29,10 +29,10 @@
 - Produces: `SoulDetailParser.parse(boxes, *, slot, rarity, set_name_override="") -> Soul`
 - Produces: `SoulParseError`
 
-- [ ] Write tests for a complete six-star soul, percentage attributes, lock/equip flags and missing required fields.
-- [ ] Run `python -m unittest tests.test_inventory_capture.SoulDetailParserTests -v` and verify RED.
-- [ ] Implement line normalization, stat parsing, confidence aggregation and stable fingerprint IDs.
-- [ ] Re-run the focused tests and verify GREEN.
+- [x] Write tests for a complete six-star soul, percentage attributes, lock/equip flags and missing required fields.
+- [x] Run `python -m unittest tests.test_inventory_capture.SoulDetailParserTests -v` and verify RED.
+- [x] Implement line normalization, stat parsing, confidence aggregation and stable fingerprint IDs.
+- [x] Re-run the focused tests and verify GREEN.
 
 ### Task 2: Parse visible scheme constraints and derive real state
 
@@ -46,10 +46,10 @@
 - Produces: `SchemeRequirementParser.parse(boxes, *, weights) -> BuildRequirement`
 - Produces: `create_state(inventory, requirement) -> DemoState`
 
-- [ ] Write tests for set counts, slot main stats, minimum speed, full critical rate and an empty real inventory.
-- [ ] Run focused tests and verify RED.
-- [ ] Implement the requirement parser and shared derived-state builder.
-- [ ] Re-run focused tests and verify GREEN.
+- [x] Write tests for set counts, slot main stats, minimum speed, full critical rate and an empty real inventory.
+- [x] Run focused tests and verify RED.
+- [x] Implement the requirement parser and shared derived-state builder.
+- [x] Re-run focused tests and verify GREEN.
 
 ### Task 3: Wire real capture into the desktop UI
 
@@ -77,4 +77,3 @@
 - [ ] Run `python -m unittest discover -s tests -v`.
 - [ ] Run `python -m compileall -q src tests` and `python -m pip check`.
 - [ ] Run `git diff --check`, commit, push `main`, and verify local/remote hashes match.
-

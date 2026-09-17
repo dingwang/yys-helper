@@ -5,11 +5,15 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 
-from yys_helper.domain.models import Soul, Stat
+from yys_helper.domain.models import BuildRequirement, Soul, Stat
 from yys_helper.infrastructure.vision import OcrBox
 
 
 class SoulParseError(ValueError):
+    pass
+
+
+class SchemeParseError(ValueError):
     pass
 
 
@@ -101,6 +105,11 @@ def _parse_stat(text: str) -> tuple[Stat, float] | None:
     return None
 
 
+def _stat_from_label(text: str) -> Stat | None:
+    compact = re.sub(r"\s+", "", _normalize_text(text))
+    return next((stat for label, stat in _STAT_LABELS if label in compact), None)
+
+
 def _fingerprint(payload: Mapping[str, object]) -> str:
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -190,4 +199,65 @@ class SoulDetailParser:
             locked=locked,
             equipped_to=equipped_to,
             confidence=confidence,
+        )
+
+
+class SchemeRequirementParser:
+    _SLOT_NUMBERS = {"二": 2, "2": 2, "四": 4, "4": 4, "六": 6, "6": 6}
+
+    def parse(
+        self,
+        boxes: Iterable[OcrBox],
+        *,
+        weights: Mapping[Stat, float],
+    ) -> BuildRequirement:
+        texts = [_normalize_text(box.text) for box in boxes]
+        set_counts: dict[str, int] = {}
+        main_stats: dict[int, frozenset[Stat]] = {}
+        minimums: dict[Stat, float] = {}
+
+        for text in texts:
+            compact = re.sub(r"\s+", "", text)
+            for set_name in KNOWN_SOUL_SETS:
+                if set_name not in compact:
+                    continue
+                count_match = re.search(
+                    rf"{re.escape(set_name)}(?:[×xX*]([246])|([246])件套)", compact
+                )
+                if count_match:
+                    set_counts[set_name] = int(
+                        count_match.group(1) or count_match.group(2)
+                    )
+
+            slot_match = re.search(r"([二四2四六6])号?位", compact)
+            if slot_match:
+                slot = self._SLOT_NUMBERS.get(slot_match.group(1))
+                stat = _stat_from_label(compact[slot_match.end() :])
+                if slot is not None and stat is not None:
+                    main_stats[slot] = frozenset({stat})
+                continue
+
+            if "满暴" in compact or "暴击满" in compact:
+                minimums[Stat.CRIT_RATE] = 100.0
+
+            for label, stat in _STAT_LABELS:
+                match = re.search(
+                    rf"{re.escape(label)}(?:总值)?(?:≥|>=|>|不低于)?"
+                    rf"(\d+(?:\.\d+)?)(?:以上)?",
+                    compact,
+                )
+                if match and any(
+                    marker in compact
+                    for marker in ("≥", ">=", ">", "不低于", "以上")
+                ):
+                    minimums[stat] = float(match.group(1))
+                    break
+
+        if not (set_counts or main_stats or minimums):
+            raise SchemeParseError("当前画面没有识别到可用的方案约束")
+        return BuildRequirement(
+            set_counts=set_counts,
+            main_stats=main_stats,
+            min_stats=minimums,
+            weights=dict(weights),
         )

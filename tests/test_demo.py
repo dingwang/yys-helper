@@ -1,6 +1,7 @@
 import unittest
 
-from yys_helper.demo import create_demo_state
+from yys_helper.demo import create_demo_state, create_state
+from yys_helper.domain.models import BuildRequirement, Stat
 
 
 class DemoTests(unittest.TestCase):
@@ -15,6 +16,17 @@ class DemoTests(unittest.TestCase):
         second = create_demo_state()
         self.assertEqual(first.inventory, second.inventory)
         self.assertEqual(first.closest_build, second.closest_build)
+
+    def test_real_state_with_empty_inventory_never_falls_back_to_demo(self):
+        requirement = BuildRequirement(
+            min_stats={Stat.SPEED: 128}, weights={Stat.SPEED: 1.0}
+        )
+
+        state = create_state([], requirement)
+
+        self.assertEqual((), state.inventory)
+        self.assertEqual((), state.closest_build.souls)
+        self.assertEqual((), state.upgrade_candidates)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from collections.abc import Iterable
+
 from .domain.models import BuildRequirement, BuildResult, Soul, Stat, UpgradeCandidate, UpgradeBudget
 from .domain.optimizer import optimize_build
 from .domain.upgrade import rank_upgrade_candidates
@@ -46,11 +48,17 @@ def create_demo_state() -> DemoState:
         min_stats={Stat.SPEED: 115, Stat.CRIT_RATE: 55},
         weights={Stat.SPEED: 1.5, Stat.CRIT_RATE: 2.0, Stat.CRIT_DAMAGE: 0.8},
     )
-    inventory = tuple(souls)
-    build = optimize_build(inventory, requirement)
+    return create_state(souls, requirement)
+
+
+def create_state(
+    inventory: Iterable[Soul], requirement: BuildRequirement
+) -> DemoState:
+    items = tuple(inventory)
+    build = optimize_build(items, requirement)
     upgrades = tuple(
         rank_upgrade_candidates(
-            inventory,
+            items,
             requirement,
             UpgradeBudget(
                 max_coins=800_000,
@@ -61,4 +69,4 @@ def create_demo_state() -> DemoState:
             ),
         )
     )
-    return DemoState(inventory, requirement, build, upgrades)
+    return DemoState(items, requirement, build, upgrades)

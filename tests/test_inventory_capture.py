@@ -1,6 +1,10 @@
 import unittest
 
-from yys_helper.application.inventory_capture import SoulDetailParser, SoulParseError
+from yys_helper.application.inventory_capture import (
+    SchemeRequirementParser,
+    SoulDetailParser,
+    SoulParseError,
+)
 from yys_helper.domain.models import Stat
 from yys_helper.infrastructure.vision import OcrBox
 
@@ -81,6 +85,37 @@ class SoulDetailParserTests(unittest.TestCase):
     def test_rejects_detail_missing_required_fields(self):
         with self.assertRaisesRegex(SoulParseError, "套装名.*主属性"):
             self.parser.parse([box("+3", 0.99, 100)], slot=1, rarity=6)
+
+
+class SchemeRequirementParserTests(unittest.TestCase):
+    def test_parses_sets_slot_main_stats_and_minimums(self):
+        boxes = [
+            box("招财猫 4件套", 0.99, 80),
+            box("火灵×2", 0.98, 120),
+            box("二号位 速度", 0.97, 180),
+            box("四号位 生命加成", 0.96, 220),
+            box("六号位 暴击", 0.95, 260),
+            box("速度 ≥ 128", 0.94, 320),
+            box("满暴", 0.93, 360),
+        ]
+        weights = {Stat.SPEED: 1.5, Stat.CRIT_RATE: 2.0}
+
+        requirement = SchemeRequirementParser().parse(boxes, weights=weights)
+
+        self.assertEqual({"招财猫": 4, "火灵": 2}, requirement.set_counts)
+        self.assertEqual(frozenset({Stat.SPEED}), requirement.main_stats[2])
+        self.assertEqual(frozenset({Stat.HP_PCT}), requirement.main_stats[4])
+        self.assertEqual(frozenset({Stat.CRIT_RATE}), requirement.main_stats[6])
+        self.assertEqual(128.0, requirement.min_stats[Stat.SPEED])
+        self.assertEqual(100.0, requirement.min_stats[Stat.CRIT_RATE])
+        self.assertEqual(weights, requirement.weights)
+
+    def test_parses_above_wording_for_total_stat(self):
+        requirement = SchemeRequirementParser().parse(
+            [box("速度128以上", 0.99, 80)], weights={Stat.SPEED: 1.0}
+        )
+
+        self.assertEqual({Stat.SPEED: 128.0}, requirement.min_stats)
 
 
 if __name__ == "__main__":

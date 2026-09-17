@@ -48,6 +48,42 @@ class AdbTests(unittest.TestCase):
             ("adb.exe", "connect", "127.0.0.1:16384"), runner.calls[0][0]
         )
 
+    def test_current_package_parses_the_top_activity(self):
+        output = (
+            b"topResumedActivity=ActivityRecord{abc u0 "
+            b"app.lawnchair/.LawnchairLauncher t2}\n"
+        )
+        runner = RecordingRunner(stdout=output)
+        client = AdbClient("adb.exe", "emulator-5556", runner=runner)
+
+        self.assertEqual("app.lawnchair", client.current_package())
+        self.assertEqual(
+            (
+                "adb.exe",
+                "-s",
+                "emulator-5556",
+                "shell",
+                "dumpsys",
+                "activity",
+                "activities",
+            ),
+            runner.calls[0][0],
+        )
+
+    def test_current_package_ignores_background_launcher_activity(self):
+        output = (
+            b"ACTIVITY app.lawnchair/.LawnchairLauncher pid=1072\n"
+            b"topResumedActivity=ActivityRecord{abc u0 "
+            b"com.netease.onmyoji.wyzymnqsd_cps/com.netease.onmyoji.Client t8}\n"
+        )
+        client = AdbClient(
+            "adb.exe", "emulator-5556", runner=RecordingRunner(stdout=output)
+        )
+
+        self.assertEqual(
+            "com.netease.onmyoji.wyzymnqsd_cps", client.current_package()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

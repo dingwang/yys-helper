@@ -88,6 +88,17 @@ class AdbClient:
                 ready.append(parts[0])
         return ready
 
+    def current_package(self) -> str | None:
+        output = self._run("shell", "dumpsys", "activity", "activities").decode(
+            "utf-8", errors="replace"
+        )
+        match = re.search(
+            r"^\s*topResumedActivity=.*?\su\d+\s+([^/\s]+)/",
+            output,
+            re.MULTILINE,
+        )
+        return match.group(1) if match else None
+
     def connect(self, endpoint: str) -> bool:
         match = re.fullmatch(r"(?:127\.0\.0\.1|localhost):(\d{1,5})", endpoint)
         if match is None or not 1 <= int(match.group(1)) <= 65535:

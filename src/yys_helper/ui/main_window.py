@@ -518,6 +518,17 @@ class MainWindow(QMainWindow):
         if self.runtime is None:
             QMessageBox.information(self, "尚未连接", "请先连接 MuMu，并把游戏停在可识别的入口页面。")
             return
+        try:
+            foreground_package = self.runtime.adb.current_package()
+        except AdbError as exc:
+            QMessageBox.warning(self, "连接异常", str(exc))
+            self.add_log(f"无法确认 MuMu 前台应用：{exc}")
+            return
+        if not foreground_package or "onmyoji" not in foreground_package.lower():
+            message = "MuMu 当前前台不是《阴阳师》；请先打开游戏并停在庭院或探索地图。"
+            QMessageBox.information(self, "游戏未在前台", message)
+            self.add_log(message)
+            return
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "任务运行中", "请先停止当前任务。")
             return

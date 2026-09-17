@@ -38,6 +38,22 @@ class UiSmokeTests(unittest.TestCase):
             self.window.analyze_scheme("|TA|bad;value")
         self.assertEqual("sentinel", QApplication.clipboard().text())
 
+    def test_task_does_not_start_when_game_is_not_foreground(self):
+        class LauncherAdb:
+            @staticmethod
+            def current_package():
+                return "app.lawnchair"
+
+        class LauncherRuntime:
+            adb = LauncherAdb()
+
+        self.window.runtime = LauncherRuntime()
+        with patch("yys_helper.ui.main_window.QMessageBox.information"):
+            self.window.start_task("chapter28", 30, 60)
+
+        self.assertIsNone(self.window.worker)
+        self.assertIn("MuMu 当前前台不是《阴阳师》", self.window.log.toPlainText())
+
 
 if __name__ == "__main__":
     unittest.main()

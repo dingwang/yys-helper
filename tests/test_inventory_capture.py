@@ -1,6 +1,7 @@
 import unittest
 
 from yys_helper.application.inventory_capture import (
+    SchemeParseError,
     SchemeRequirementParser,
     SoulDetailParser,
     SoulParseError,
@@ -19,6 +20,7 @@ class SoulDetailParserTests(unittest.TestCase):
 
     def test_parses_complete_six_star_soul_detail(self):
         boxes = [
+            box("御魂详情", 0.99, 35),
             box("招财猫", 0.99, 80),
             box("+6", 0.98, 130),
             box("攻击加成 18%", 0.97, 210),
@@ -51,6 +53,7 @@ class SoulDetailParserTests(unittest.TestCase):
 
     def test_percentage_suffix_selects_percentage_stat(self):
         boxes = [
+            box("御魂详情", 0.99, 35),
             box("海月火玉", 0.99, 80),
             box("+0", 0.98, 130),
             box("生命加成 10%", 0.97, 210),
@@ -67,6 +70,7 @@ class SoulDetailParserTests(unittest.TestCase):
 
     def test_override_supplies_unrecognized_set_name_and_id_is_stable(self):
         boxes = [
+            box("御魂详情", 0.99, 35),
             box("+15", 0.99, 130),
             box("速度 57", 0.98, 210),
             box("效果抵抗 +8%", 0.97, 280),
@@ -84,12 +88,42 @@ class SoulDetailParserTests(unittest.TestCase):
 
     def test_rejects_detail_missing_required_fields(self):
         with self.assertRaisesRegex(SoulParseError, "套装名.*主属性"):
-            self.parser.parse([box("+3", 0.99, 100)], slot=1, rarity=6)
+            self.parser.parse(
+                [box("御魂详情", 0.99, 35), box("+3", 0.99, 100)],
+                slot=1,
+                rarity=6,
+            )
+
+    def test_rejects_fragments_from_a_non_detail_page(self):
+        boxes = [
+            box("招财猫", 0.99, 80),
+            box("+6", 0.99, 130),
+            box("速度 24", 0.99, 210),
+        ]
+
+        with self.assertRaisesRegex(SoulParseError, "不像御魂详情页"):
+            self.parser.parse(boxes, slot=2, rarity=6)
+
+    def test_ignores_stats_outside_the_anchored_detail_panel(self):
+        boxes = [
+            OcrBox("生命 9999", 0.99, (80, 150, 260, 180)),
+            box("御魂详情", 0.99, 35),
+            box("招财猫", 0.99, 80),
+            box("+6", 0.99, 130),
+            box("速度 24", 0.99, 210),
+            box("暴击 +6%", 0.99, 280),
+        ]
+
+        soul = self.parser.parse(boxes, slot=2, rarity=6)
+
+        self.assertEqual(Stat.SPEED, soul.main_stat)
+        self.assertEqual(24.0, soul.main_value)
 
 
 class SchemeRequirementParserTests(unittest.TestCase):
     def test_parses_sets_slot_main_stats_and_minimums(self):
         boxes = [
+            box("方案详情", 0.99, 35),
             box("招财猫 4件套", 0.99, 80),
             box("火灵×2", 0.98, 120),
             box("二号位 速度", 0.97, 180),
@@ -112,10 +146,43 @@ class SchemeRequirementParserTests(unittest.TestCase):
 
     def test_parses_above_wording_for_total_stat(self):
         requirement = SchemeRequirementParser().parse(
-            [box("速度128以上", 0.99, 80)], weights={Stat.SPEED: 1.0}
+            [box("方案详情", 0.99, 35), box("速度128以上", 0.99, 80)],
+            weights={Stat.SPEED: 1.0},
         )
 
         self.assertEqual({Stat.SPEED: 128.0}, requirement.min_stats)
+
+    def test_parses_split_lines_alternatives_and_upper_bounds(self):
+        boxes = [
+            OcrBox("方案", 0.99, (900, 35, 980, 63)),
+            OcrBox("详情", 0.99, (985, 35, 1060, 63)),
+            OcrBox("六号位", 0.99, (900, 100, 1000, 128)),
+            OcrBox("暴击/暴击伤害", 0.99, (1010, 100, 1240, 128)),
+            OcrBox("速度", 0.99, (900, 160, 980, 188)),
+            OcrBox("不超过 150", 0.99, (990, 160, 1140, 188)),
+        ]
+
+        requirement = SchemeRequirementParser().parse(
+            boxes, weights={Stat.SPEED: 1.0}
+        )
+
+        self.assertEqual(
+            frozenset({Stat.CRIT_RATE, Stat.CRIT_DAMAGE}),
+            requirement.main_stats[6],
+        )
+        self.assertEqual(150.0, requirement.max_stats[Stat.SPEED])
+
+    def test_rejects_low_confidence_or_unanchored_partial_scheme(self):
+        parser = SchemeRequirementParser()
+        with self.assertRaisesRegex(SchemeParseError, "方案详情页"):
+            parser.parse(
+                [box("方案详情", 0.80, 35), box("速度 ≥ 128", 0.99, 80)],
+                weights={Stat.SPEED: 1.0},
+            )
+        with self.assertRaisesRegex(SchemeParseError, "方案详情页"):
+            parser.parse(
+                [box("速度 ≥ 128", 0.99, 80)], weights={Stat.SPEED: 1.0}
+            )
 
 
 if __name__ == "__main__":

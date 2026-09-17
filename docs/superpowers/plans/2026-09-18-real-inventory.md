@@ -63,17 +63,17 @@
 - Inventory page emits `capture_requested(set_name, slot, rarity)`.
 - Scheme page emits `read_game_requested()`.
 
-- [ ] Write GUI tests proving normal mode starts empty and a captured soul refreshes the table.
-- [ ] Run focused UI tests and verify RED.
-- [ ] Add capture controls, read-only OCR handlers and refreshable pages.
-- [ ] Re-run focused UI tests and verify GREEN.
+- [x] Write GUI tests proving normal mode starts empty and a captured soul refreshes the table.
+- [x] Run focused UI tests and verify RED.
+- [x] Add capture controls, read-only OCR handlers and refreshable pages.
+- [x] Re-run focused UI tests and verify GREEN.
 
 ### Task 4: Documentation, verification and delivery
 
 **Files:**
 - Modify: `README.md`
 
-- [ ] Document the real capture workflow, the opaque scheme-code boundary and read-only safety model.
-- [ ] Run `python -m unittest discover -s tests -v`.
-- [ ] Run `python -m compileall -q src tests` and `python -m pip check`.
+- [x] Document the real capture workflow, the opaque scheme-code boundary and read-only safety model.
+- [x] Run `python -m unittest discover -s tests -v`.
+- [x] Run `python -m compileall -q src tests` and `python -m pip check`.
 - [ ] Run `git diff --check`, commit, push `main`, and verify local/remote hashes match.

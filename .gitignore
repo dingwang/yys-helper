@@ -11,4 +11,5 @@ logs/
 *.sqlite3
 *.png
 !assets/**/*.png
+!src/yys_helper/assets/*.png
 .git-codex-init-backup/

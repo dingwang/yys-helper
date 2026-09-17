@@ -48,7 +48,15 @@ class MarkOutcome:
 
 def _shortfall_penalty(build: BuildResult, requirement: BuildRequirement) -> float:
     return sum(
-        gap / max(abs(requirement.min_stats.get(stat, 0.0)), 1.0)
+        abs(gap)
+        / max(
+            abs(
+                requirement.min_stats.get(
+                    stat, requirement.max_stats.get(stat, 0.0)
+                )
+            ),
+            1.0,
+        )
         for stat, gap in build.shortfalls.items()
     )
 

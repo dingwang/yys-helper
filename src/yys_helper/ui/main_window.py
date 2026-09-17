@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -25,6 +29,12 @@ from PySide6.QtWidgets import (
 )
 
 from yys_helper.application.runtime import OcrMumuRuntime
+from yys_helper.application.inventory_capture import (
+    SchemeParseError,
+    SchemeRequirementParser,
+    SoulDetailParser,
+    SoulParseError,
+)
 from yys_helper.application.schemes import (
     InvalidSchemeCode,
     decode_qr_scheme,
@@ -32,8 +42,8 @@ from yys_helper.application.schemes import (
 )
 from yys_helper.automation.engine import AutomationEngine, CancellationToken
 from yys_helper.automation.workflows import chapter_28_workflow, soul_dungeon_workflow
-from yys_helper.demo import DemoState
-from yys_helper.domain.models import Stat, TaskLimits
+from yys_helper.demo import DemoState, create_state
+from yys_helper.domain.models import BuildRequirement, Stat, TaskLimits
 from yys_helper.domain.safety import protection_reasons
 from yys_helper.domain.scoring import DEFAULT_PROFILES, score_soul
 from yys_helper.infrastructure.adb import AdbClient, AdbError, discover_adb
@@ -89,6 +99,7 @@ class DashboardPage(QWidget):
         outer.addWidget(page)
 
         metrics = QHBoxLayout()
+        self.metric_values: list[QLabel] = []
         for label, value in (
             ("已扫描御魂", str(len(demo.inventory))),
             ("当前缺口", str(len(demo.closest_build.shortfalls))),
@@ -97,6 +108,7 @@ class DashboardPage(QWidget):
             frame, inner = card()
             number = QLabel(value)
             number.setObjectName("metric")
+            self.metric_values.append(number)
             inner.addWidget(number)
             name = QLabel(label)
             name.setObjectName("muted")
@@ -117,6 +129,15 @@ class DashboardPage(QWidget):
         preview_layout.addWidget(self.preview, 1)
         layout.addWidget(preview_card, 1)
 
+    def update_state(self, state: DemoState) -> None:
+        values = (
+            len(state.inventory),
+            len(state.closest_build.shortfalls),
+            len(state.upgrade_candidates),
+        )
+        for label, value in zip(self.metric_values, values, strict=True):
+            label.setText(str(value))
+
     def set_screenshot(self, png: bytes) -> None:
         image = QImage.fromData(png, "PNG")
         pixmap = QPixmap.fromImage(image)
@@ -132,9 +153,11 @@ class DashboardPage(QWidget):
 class SchemePage(QWidget):
     analyze_requested = Signal(str)
     qr_requested = Signal(Path)
+    read_game_requested = Signal(int)
 
-    def __init__(self, demo: DemoState) -> None:
+    def __init__(self, demo: DemoState, *, demo_mode: bool) -> None:
         super().__init__()
+        self.demo_mode = demo_mode
         page, layout = page_title(
             "方案配装",
             "导入他人的文字码或二维码；先匹配现有御魂，未达标时转入强化建议。",
@@ -149,29 +172,83 @@ class SchemePage(QWidget):
         self.code.setMaximumHeight(100)
         inner.addWidget(self.code)
         row = QHBoxLayout()
-        analyze = QPushButton("验证并分析")
+        analyze = QPushButton("校验并复制")
         analyze.setObjectName("primary")
         analyze.clicked.connect(lambda: self.analyze_requested.emit(self.code.toPlainText()))
         qr = QPushButton("选择二维码图片")
         qr.clicked.connect(self._choose_qr)
+        self.read_game = QPushButton("读取当前游戏方案")
+        self.read_game.setToolTip("只读取当前 MuMu 截图，不发送点击")
+        self.read_game.setEnabled(not demo_mode)
+        self.read_game.clicked.connect(
+            lambda: self.read_game_requested.emit(self.base_speed.value())
+        )
         row.addWidget(analyze)
         row.addWidget(qr)
+        row.addWidget(self.read_game)
         row.addStretch()
         inner.addLayout(row)
+        base_row = QHBoxLayout()
+        base_hint = QLabel("面板阈值换算")
+        base_hint.setObjectName("muted")
+        base_row.addWidget(base_hint)
+        base_row.addWidget(QLabel("式神基础速度"))
+        self.base_speed = QSpinBox()
+        self.base_speed.setRange(0, 300)
+        self.base_speed.setSpecialValueText("未填写")
+        base_row.addWidget(self.base_speed)
+        base_row.addStretch()
+        inner.addLayout(base_row)
         layout.addWidget(input_card)
 
         result_card, result_layout = card()
-        result_layout.addWidget(QLabel("当前库存模拟结果"))
-        status = "满足全部条件" if demo.closest_build.satisfied else "现有御魂未完全达标"
+        self.result_caption = QLabel(
+            "演示库存结果" if demo_mode else "真实库存结果"
+        )
+        result_layout.addWidget(self.result_caption)
+        status = self._status_text(demo)
         self.result = QLabel(status)
         self.result.setStyleSheet("font-size:18px;font-weight:700;color:#F6C453")
         result_layout.addWidget(self.result)
         details = []
         for stat, gap in demo.closest_build.shortfalls.items():
-            details.append(f"{STAT_LABELS.get(stat, stat.value)} 还差 {gap:g}")
-        result_layout.addWidget(QLabel("；".join(details) or "可直接应用六件套"))
+            label = STAT_LABELS.get(stat, stat.value)
+            details.append(
+                f"{label} 还差 {gap:g}"
+                if gap >= 0
+                else f"{label} 超过上限 {-gap:g}"
+            )
+        self.details = QLabel("；".join(details) or self._empty_or_satisfied(demo))
+        self.details.setWordWrap(True)
+        result_layout.addWidget(self.details)
         layout.addWidget(result_card)
         layout.addStretch()
+
+    @staticmethod
+    def _status_text(state: DemoState) -> str:
+        if not state.inventory:
+            return "等待真实御魂数据"
+        return "满足全部条件" if state.closest_build.satisfied else "现有御魂未完全达标"
+
+    @staticmethod
+    def _empty_or_satisfied(state: DemoState) -> str:
+        return "请先到御魂仓库采集详情" if not state.inventory else "可直接应用六件套"
+
+    def update_state(self, state: DemoState, *, demo_mode: bool) -> None:
+        self.result_caption.setText("演示库存结果" if demo_mode else "真实库存结果")
+        self.result.setText(self._status_text(state))
+        details = []
+        for stat, gap in state.closest_build.shortfalls.items():
+            label = STAT_LABELS.get(stat, stat.value)
+            details.append(
+                f"{label} 还差 {gap:g}"
+                if gap >= 0
+                else f"{label} 超过上限 {-gap:g}"
+            )
+        self.details.setText("；".join(details) or self._empty_or_satisfied(state))
+
+    def set_live_enabled(self, enabled: bool) -> None:
+        self.read_game.setEnabled(enabled and not self.demo_mode)
 
     def _choose_qr(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -182,29 +259,98 @@ class SchemePage(QWidget):
 
 
 class InventoryPage(QWidget):
-    def __init__(self, demo: DemoState) -> None:
+    capture_requested = Signal(str, int, int, str)
+    delete_requested = Signal(str)
+
+    def __init__(self, demo: DemoState, *, demo_mode: bool) -> None:
         super().__init__()
+        self.demo_mode = demo_mode
+        self._live_enabled = not demo_mode
         page, layout = page_title(
-            "御魂仓库", "按输出模板评分；受保护的御魂永远不会自动弃置或作为材料。"
+            "御魂仓库", "只读采集当前御魂详情；受保护的御魂永远不会自动弃置或作为材料。"
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
+
+        capture_card, capture_layout = card()
+        capture_title = QLabel("真实数据采集")
+        capture_title.setStyleSheet("font-size:16px;font-weight:700")
+        capture_layout.addWidget(capture_title)
+        capture_hint = QLabel(
+            "在游戏中手动打开一枚御魂详情，确认位置与星级后读取。助手只截屏，不会点击游戏。"
+        )
+        capture_hint.setObjectName("muted")
+        capture_hint.setWordWrap(True)
+        capture_layout.addWidget(capture_hint)
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("套装名覆盖"))
+        self.set_override = QLineEdit()
+        self.set_override.setPlaceholderText("留空自动识别")
+        self.set_override.setMaximumWidth(180)
+        controls.addWidget(self.set_override)
+        controls.addWidget(QLabel("位置"))
+        self.slot = QSpinBox()
+        self.slot.setRange(1, 6)
+        self.slot.setValue(1)
+        controls.addWidget(self.slot)
+        controls.addWidget(QLabel("星级"))
+        self.rarity = QSpinBox()
+        self.rarity.setRange(1, 6)
+        self.rarity.setValue(6)
+        controls.addWidget(self.rarity)
+        self.capture_new = QPushButton("新增读取")
+        self.capture_new.setObjectName("primary")
+        self.capture_new.clicked.connect(
+            lambda: self.capture_requested.emit(
+                self.set_override.text(), self.slot.value(), self.rarity.value(), ""
+            )
+        )
+        controls.addWidget(self.capture_new)
+        controls.addStretch()
+        capture_layout.addLayout(controls)
+        record_controls = QHBoxLayout()
+        record_hint = QLabel("选中表格中的记录后，可重新读取覆盖或从本地仓库删除。")
+        record_hint.setObjectName("muted")
+        record_controls.addWidget(record_hint)
+        record_controls.addStretch()
+        self.capture_update = QPushButton("更新选中")
+        self.capture_update.clicked.connect(self._emit_update)
+        record_controls.addWidget(self.capture_update)
+        self.delete_selected = QPushButton("删除选中记录")
+        self.delete_selected.setObjectName("danger")
+        self.delete_selected.clicked.connect(self._emit_delete)
+        record_controls.addWidget(self.delete_selected)
+        capture_layout.addLayout(record_controls)
+        self.capture_status = QLabel()
+        self.capture_status.setObjectName("statusPill")
+        capture_layout.addWidget(self.capture_status)
+        layout.addWidget(capture_card)
+
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             ["套装", "位置", "星级", "等级", "主属性", "速度", "输出分", "保护状态"]
         )
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.populate(demo)
+        self.table.itemSelectionChanged.connect(self._update_record_buttons)
+        self.populate(demo, demo_mode=demo_mode)
         layout.addWidget(self.table, 1)
+        self.set_live_enabled(not demo_mode)
 
-    def populate(self, demo: DemoState) -> None:
+    def populate(self, demo: DemoState, *, demo_mode: bool) -> None:
+        self._souls_by_id = {soul.id: soul for soul in demo.inventory}
         self.table.setRowCount(len(demo.inventory))
         for row, soul in enumerate(demo.inventory):
             reasons = protection_reasons(soul, demo.requirement.referenced_soul_ids)
+            review_state = (
+                "待复核"
+                if "low_confidence" in reasons
+                else "已保护" if reasons else "可评估"
+            )
             values = (
                 soul.set_name,
                 str(soul.slot),
@@ -213,10 +359,62 @@ class InventoryPage(QWidget):
                 STAT_LABELS.get(soul.main_stat, soul.main_stat.value),
                 f"{soul.stat_value(Stat.SPEED):g}",
                 f"{score_soul(soul, DEFAULT_PROFILES['output']):.1f}",
-                "已保护" if reasons else "可评估",
+                review_state,
             )
             for column, value in enumerate(values):
-                self.table.setItem(row, column, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                item.setData(Qt.ItemDataRole.UserRole, soul.id)
+                self.table.setItem(row, column, item)
+        if demo_mode:
+            self.capture_status.setText(f"演示模式 · {len(demo.inventory)} 枚样例御魂")
+        elif demo.inventory:
+            self.capture_status.setText(f"已采集 {len(demo.inventory)} 枚真实御魂 · 数据仅保存在本机")
+        else:
+            self.capture_status.setText("尚未采集真实御魂")
+        self._update_record_buttons()
+
+    def selected_soul_id(self) -> str:
+        row = self.table.currentRow()
+        if row < 0:
+            return ""
+        item = self.table.item(row, 0)
+        return str(item.data(Qt.ItemDataRole.UserRole)) if item else ""
+
+    def _emit_update(self) -> None:
+        soul_id = self.selected_soul_id()
+        if soul_id:
+            self.capture_requested.emit(
+                self.set_override.text(),
+                self.slot.value(),
+                self.rarity.value(),
+                soul_id,
+            )
+
+    def _emit_delete(self) -> None:
+        soul_id = self.selected_soul_id()
+        if soul_id:
+            self.delete_requested.emit(soul_id)
+
+    def _update_record_buttons(self) -> None:
+        soul_id = self.selected_soul_id()
+        has_selection = bool(soul_id)
+        selected = self._souls_by_id.get(soul_id)
+        if selected is not None:
+            self.set_override.setText(selected.set_name)
+            self.slot.setValue(selected.slot)
+            self.rarity.setValue(selected.rarity)
+        enabled = self._live_enabled and not self.demo_mode
+        self.capture_update.setEnabled(enabled and has_selection)
+        self.delete_selected.setEnabled(enabled and has_selection)
+
+    def set_live_enabled(self, enabled: bool) -> None:
+        self._live_enabled = enabled
+        available = enabled and not self.demo_mode
+        self.capture_new.setEnabled(available)
+        self.set_override.setEnabled(available)
+        self.slot.setEnabled(available)
+        self.rarity.setEnabled(available)
+        self._update_record_buttons()
 
 
 class UpgradePage(QWidget):
@@ -245,10 +443,15 @@ class UpgradePage(QWidget):
         budget_layout.addLayout(budget_row)
         layout.addWidget(budget_card)
 
-        table = QTableWidget(len(demo.upgrade_candidates), 6)
-        table.setHorizontalHeaderLabels(["优先级", "套装/位置", "当前", "下一检查点", "预计金币", "命中目标"])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        table.verticalHeader().setVisible(False)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["优先级", "套装/位置", "当前", "下一检查点", "预计金币", "命中目标"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        self.populate(demo)
+        layout.addWidget(self.table, 1)
+
+    def populate(self, demo: DemoState) -> None:
+        self.table.setRowCount(len(demo.upgrade_candidates))
         for row, candidate in enumerate(demo.upgrade_candidates):
             values = (
                 str(row + 1),
@@ -259,8 +462,7 @@ class UpgradePage(QWidget):
                 " / ".join(candidate.reasons),
             )
             for column, value in enumerate(values):
-                table.setItem(row, column, QTableWidgetItem(value))
-        layout.addWidget(table, 1)
+                self.table.setItem(row, column, QTableWidgetItem(value))
 
 
 class DailiesPage(QWidget):
@@ -268,6 +470,7 @@ class DailiesPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._task_active = False
         page, layout = page_title(
             "日常任务", "达到次数/时长上限、体力不足或三次识别失败时自动停止。"
         )
@@ -288,9 +491,13 @@ class DailiesPage(QWidget):
         row.addWidget(self.minutes)
         row.addStretch()
         settings_layout.addLayout(row)
+        self.risk_ack = QCheckBox("我理解自动操作可能违反游戏规则并带来账号处罚风险")
+        self.risk_ack.setObjectName("riskCheck")
+        settings_layout.addWidget(self.risk_ack)
         layout.addWidget(settings)
 
         choices = QHBoxLayout()
+        self.task_buttons: list[QPushButton] = []
         for task_id, title, description in (
             ("chapter28", "困 28 经验", "循环选怪、战斗、结算；首版不自动更换狗粮。"),
             ("soul", "御魂副本", "循环挑战与结算，保留阵容，不触发付费补充体力。"),
@@ -303,6 +510,7 @@ class DailiesPage(QWidget):
             copy.setWordWrap(True)
             button = QPushButton("启动任务")
             button.setObjectName("primary")
+            button.setEnabled(False)
             button.clicked.connect(
                 lambda _checked=False, value=task_id: self.start_requested.emit(
                     value, self.rounds.value(), self.minutes.value()
@@ -312,16 +520,32 @@ class DailiesPage(QWidget):
             inner.addWidget(copy)
             inner.addStretch()
             inner.addWidget(button)
+            self.task_buttons.append(button)
             choices.addWidget(task_card)
+        self.risk_ack.toggled.connect(self._set_task_buttons_enabled)
         layout.addLayout(choices)
         layout.addStretch()
+
+    def _set_task_buttons_enabled(self, enabled: bool) -> None:
+        for button in self.task_buttons:
+            button.setEnabled(enabled and not self._task_active)
+
+    def set_task_active(self, active: bool) -> None:
+        self._task_active = active
+        self._set_task_buttons_enabled(self.risk_ack.isChecked())
 
 
 class TaskWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, runtime: OcrMumuRuntime, mode: str, limits: TaskLimits, token: CancellationToken):
+    def __init__(
+        self,
+        runtime: OcrMumuRuntime,
+        mode: str,
+        limits: TaskLimits,
+        token: CancellationToken,
+    ):
         super().__init__()
         self.runtime = runtime
         self.mode = mode
@@ -330,8 +554,14 @@ class TaskWorker(QThread):
 
     def run(self) -> None:
         try:
-            workflow = chapter_28_workflow() if self.mode == "chapter28" else soul_dungeon_workflow()
-            result = AutomationEngine(self.runtime, self.runtime).run(workflow, self.limits, self.token)
+            workflow = (
+                chapter_28_workflow()
+                if self.mode == "chapter28"
+                else soul_dungeon_workflow()
+            )
+            result = AutomationEngine(self.runtime, self.runtime).run(
+                workflow, self.limits, self.token
+            )
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -347,12 +577,15 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.demo = demo
+        self.current_requirement = demo.requirement
         self.demo_mode = demo_mode
         self.repository = repository
         self.runtime: OcrMumuRuntime | None = None
         self.worker: TaskWorker | None = None
         self.cancel_token = CancellationToken()
         self.setWindowTitle("御魂匠 · 阴阳师助手")
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "app-icon.png"
+        self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1280, 820)
         self.setMinimumSize(1050, 680)
 
@@ -367,18 +600,33 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(220)
         nav_layout = QVBoxLayout(sidebar)
         nav_layout.setContentsMargins(18, 22, 18, 18)
+        brand_row = QHBoxLayout()
+        brand_icon = QLabel()
+        brand_icon.setPixmap(
+            QPixmap(str(icon_path)).scaled(
+                52,
+                52,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        brand_copy = QVBoxLayout()
         brand = QLabel("御魂匠")
         brand.setObjectName("brand")
-        nav_layout.addWidget(brand)
-        tagline = QLabel("YYS HELPER · LOCAL")
+        tagline = QLabel("LOCAL · READ FIRST")
         tagline.setObjectName("muted")
-        nav_layout.addWidget(tagline)
+        brand_copy.addWidget(brand)
+        brand_copy.addWidget(tagline)
+        brand_row.addWidget(brand_icon)
+        brand_row.addLayout(brand_copy)
+        brand_row.addStretch()
+        nav_layout.addLayout(brand_row)
         nav_layout.addSpacing(24)
 
         self.stack = QStackedWidget()
         self.dashboard = DashboardPage(demo)
-        self.scheme_page = SchemePage(demo)
-        self.inventory_page = InventoryPage(demo)
+        self.scheme_page = SchemePage(demo, demo_mode=demo_mode)
+        self.inventory_page = InventoryPage(demo, demo_mode=demo_mode)
         self.upgrade_page = UpgradePage(demo)
         self.dailies_page = DailiesPage()
         pages = [
@@ -415,13 +663,17 @@ class MainWindow(QMainWindow):
         self.connection = QLabel("● 未连接 MuMu" if not demo_mode else "● 演示模式")
         self.connection.setStyleSheet("color:#F0A95A")
         header_layout.addWidget(self.connection)
+        privacy = QLabel("只读采集 · 本地存储")
+        privacy.setObjectName("safePill")
+        header_layout.addWidget(privacy)
         header_layout.addStretch()
-        connect = QPushButton("连接 MuMu")
-        connect.clicked.connect(self.connect_mumu)
+        self.connect_button = QPushButton("连接 MuMu")
+        self.connect_button.setEnabled(not demo_mode)
+        self.connect_button.clicked.connect(self.connect_mumu)
         stop = QPushButton("F12 紧急停止")
         stop.setObjectName("danger")
         stop.clicked.connect(self.stop_task)
-        header_layout.addWidget(connect)
+        header_layout.addWidget(self.connect_button)
         header_layout.addWidget(stop)
         content_layout.addWidget(header)
         content_layout.addWidget(self.stack, 1)
@@ -441,8 +693,16 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F12"), self, activated=self.stop_task)
         self.scheme_page.analyze_requested.connect(self.analyze_scheme)
         self.scheme_page.qr_requested.connect(self.import_qr)
+        self.scheme_page.read_game_requested.connect(self.read_current_scheme)
+        self.inventory_page.capture_requested.connect(self.capture_current_soul)
+        self.inventory_page.delete_requested.connect(self.delete_soul_record)
         self.dailies_page.start_requested.connect(self.start_task)
-        self.add_log("助手已启动；当前为演示库存。连接 MuMu 后才会发送输入。")
+        if demo_mode:
+            self.add_log("助手已启动；当前为演示库存，不会向 MuMu 发送输入。")
+        elif demo.inventory:
+            self.add_log(f"已加载 {len(demo.inventory)} 枚本地真实御魂记录。")
+        else:
+            self.add_log("真实仓库为空；请在游戏内手动打开御魂详情后使用只读采集。")
 
     def _navigate(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -454,10 +714,46 @@ class MainWindow(QMainWindow):
         if self.repository is not None:
             self.repository.add_audit("ui_log", {"message": message})
 
+    def _task_running(self) -> bool:
+        return bool(self.worker and self.worker.isRunning())
+
+    def _set_task_active(self, active: bool) -> None:
+        self.connect_button.setEnabled(not active and not self.demo_mode)
+        self.scheme_page.set_live_enabled(not active)
+        self.inventory_page.set_live_enabled(not active)
+        self.dailies_page.set_task_active(active)
+
+    def _require_game_foreground(self, action_name: str) -> bool:
+        if self.runtime is None:
+            QMessageBox.information(
+                self, "尚未连接", f"请先连接 MuMu，再{action_name}。"
+            )
+            return False
+        try:
+            foreground_package = self.runtime.adb.current_package()
+        except AdbError as exc:
+            QMessageBox.warning(self, "连接异常", str(exc))
+            self.add_log(f"无法确认 MuMu 前台应用：{exc}")
+            return False
+        if not foreground_package or "onmyoji" not in foreground_package.lower():
+            message = f"MuMu 当前前台不是《阴阳师》，无法{action_name}。"
+            QMessageBox.information(self, "游戏未在前台", message)
+            self.add_log(message)
+            return False
+        return True
+
     def connect_mumu(self) -> None:
+        if self.demo_mode:
+            QMessageBox.information(self, "演示模式", "请用普通模式启动后再连接 MuMu。")
+            return
+        if self._task_running():
+            QMessageBox.information(self, "任务运行中", "请先停止当前任务。")
+            return
         candidates = discover_adb()
         if not candidates:
-            filename, _ = QFileDialog.getOpenFileName(self, "选择 MuMu 的 adb.exe", "", "adb.exe (adb.exe)")
+            filename, _ = QFileDialog.getOpenFileName(
+                self, "选择 MuMu 的 adb.exe", "", "adb.exe (adb.exe)"
+            )
             if not filename:
                 self.add_log("未找到 ADB；已取消连接。")
                 return
@@ -499,10 +795,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "方案码无效", str(exc))
             return
         QApplication.clipboard().setText(code)
-        self.add_log("方案码校验通过并已复制；当前演示库存已完成最近似六件套求解。")
-        self.scheme_page.result.setText(
-            "现有御魂可直接达标" if self.demo.closest_build.satisfied else "未完全达标，已生成分段强化候选"
-        )
+        self.add_log("方案码校验通过并已复制。请在游戏阵容助手中导入、计算并打开方案详情。")
+        self.scheme_page.result.setText("方案码已复制，等待读取游戏计算结果")
 
     def import_qr(self, path: Path) -> None:
         try:
@@ -518,6 +812,17 @@ class MainWindow(QMainWindow):
         if self.runtime is None:
             QMessageBox.information(self, "尚未连接", "请先连接 MuMu，并把游戏停在可识别的入口页面。")
             return
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "任务运行中", "请先停止当前任务。")
+            return
+        if not self.dailies_page.risk_ack.isChecked():
+            QMessageBox.information(
+                self,
+                "需要风险确认",
+                "自动刷图可能违反游戏规则。请先阅读并勾选风险确认。",
+            )
+            self.add_log("自动任务未启动：尚未确认账号风险。")
+            return
         try:
             foreground_package = self.runtime.adb.current_package()
         except AdbError as exc:
@@ -529,15 +834,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "游戏未在前台", message)
             self.add_log(message)
             return
-        if self.worker and self.worker.isRunning():
-            QMessageBox.information(self, "任务运行中", "请先停止当前任务。")
-            return
         self.cancel_token = CancellationToken()
         limits = TaskLimits(max_rounds=rounds, max_duration_seconds=minutes * 60)
         self.worker = TaskWorker(self.runtime, mode, limits, self.cancel_token)
         self.worker.completed.connect(self._task_completed)
-        self.worker.failed.connect(lambda message: self.add_log(f"任务异常：{message}"))
-        self.worker.start()
+        self.worker.failed.connect(self._task_failed)
+        self._set_task_active(True)
+        try:
+            self.worker.start()
+        except Exception:
+            self._set_task_active(False)
+            raise
         label = "困28" if mode == "chapter28" else "御魂副本"
         self.add_log(f"已启动{label}：最多 {rounds} 轮 / {minutes} 分钟。")
 
@@ -546,4 +853,202 @@ class MainWindow(QMainWindow):
         self.add_log("已请求紧急停止；不会再发送新的点击。")
 
     def _task_completed(self, result) -> None:
+        self._set_task_active(False)
         self.add_log(f"任务停止：{result.reason.value}，完成 {result.rounds} 轮，最终场景 {result.final_state}。")
+
+    def _task_failed(self, message: str) -> None:
+        self._set_task_active(False)
+        self.add_log(f"任务异常：{message}")
+
+    def refresh_state(self, state: DemoState) -> None:
+        self.demo = state
+        self.current_requirement = state.requirement
+        self.dashboard.update_state(state)
+        self.scheme_page.update_state(state, demo_mode=self.demo_mode)
+        self.inventory_page.populate(state, demo_mode=self.demo_mode)
+        self.upgrade_page.populate(state)
+
+    @staticmethod
+    def _convert_panel_thresholds(
+        requirement: BuildRequirement, *, base_speed: int
+    ) -> BuildRequirement:
+        constrained = set(requirement.min_stats) | set(requirement.max_stats)
+        unsupported = constrained - {Stat.SPEED}
+        if unsupported:
+            labels = "、".join(
+                STAT_LABELS.get(stat, stat.value)
+                for stat in sorted(unsupported, key=lambda item: item.value)
+            )
+            raise SchemeParseError(
+                f"暂不支持把面板{labels}换算为御魂属性；本次方案不会应用"
+            )
+        if Stat.SPEED in constrained and base_speed <= 0:
+            raise SchemeParseError("方案包含面板速度，请先填写目标式神的基础速度")
+        base_values = {Stat.SPEED: float(base_speed)}
+
+        def gear_values(values):
+            return {
+                stat: max(0.0, value - base_values.get(stat, 0.0))
+                for stat, value in values.items()
+            }
+
+        return BuildRequirement(
+            set_counts=requirement.set_counts,
+            main_stats=requirement.main_stats,
+            min_stats=gear_values(requirement.min_stats),
+            max_stats=gear_values(requirement.max_stats),
+            weights=requirement.weights,
+            referenced_soul_ids=requirement.referenced_soul_ids,
+        )
+
+    @staticmethod
+    def _requirement_summary(requirement: BuildRequirement) -> str:
+        lines: list[str] = []
+        if requirement.set_counts:
+            lines.append(
+                "套装："
+                + "，".join(
+                    f"{name} × {count}"
+                    for name, count in requirement.set_counts.items()
+                )
+            )
+        for slot, stats in sorted(requirement.main_stats.items()):
+            labels = "/".join(STAT_LABELS.get(stat, stat.value) for stat in stats)
+            lines.append(f"{slot}号位主属性：{labels}")
+        for stat, value in requirement.min_stats.items():
+            lines.append(f"御魂提供 {STAT_LABELS.get(stat, stat.value)} ≥ {value:g}")
+        for stat, value in requirement.max_stats.items():
+            lines.append(f"御魂提供 {STAT_LABELS.get(stat, stat.value)} ≤ {value:g}")
+        return "\n".join(lines)
+
+    def capture_current_soul(
+        self, set_name_override: str, slot: int, rarity: int, record_id: str = ""
+    ) -> None:
+        if self.demo_mode:
+            QMessageBox.information(
+                self,
+                "演示模式",
+                "演示数据与真实仓库完全隔离；请用普通模式进行采集。",
+            )
+            return
+        if self._task_running():
+            QMessageBox.information(self, "任务运行中", "请先停止任务，再读取御魂。")
+            return
+        if self.repository is None:
+            QMessageBox.warning(self, "无法保存", "本地数据库未初始化。")
+            return
+        if not self._require_game_foreground("读取御魂详情"):
+            return
+        cursor_active = True
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            boxes = self.runtime.capture_boxes()
+            soul = SoulDetailParser().parse(
+                boxes,
+                slot=slot,
+                rarity=rarity,
+                set_name_override=set_name_override,
+            )
+            soul = replace(
+                soul,
+                id=record_id or f"local-{uuid4().hex}",
+            )
+            self.repository.save_souls([soul])
+            state = create_state(
+                self.repository.list_souls(), self.current_requirement
+            )
+            self.refresh_state(state)
+            self.add_log(
+                f"只读{'更新' if record_id else '新增'}成功："
+                f"{soul.set_name} {soul.slot}号位 +{soul.level}，"
+                f"OCR 置信度 {soul.confidence:.1%}。"
+            )
+        except SoulParseError as exc:
+            QApplication.restoreOverrideCursor()
+            cursor_active = False
+            QMessageBox.warning(self, "无法识别御魂详情", str(exc))
+            self.add_log(f"只读采集失败：{exc}")
+        except Exception as exc:
+            QApplication.restoreOverrideCursor()
+            cursor_active = False
+            QMessageBox.warning(self, "采集失败", str(exc))
+            self.add_log(f"只读采集异常：{exc}")
+        finally:
+            if cursor_active:
+                QApplication.restoreOverrideCursor()
+
+    def delete_soul_record(self, soul_id: str) -> None:
+        if self.demo_mode or self.repository is None or self._task_running():
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除本地记录",
+            "只删除助手本地数据库中的这条记录，不会操作游戏。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.repository.delete_soul(soul_id)
+        self.refresh_state(
+            create_state(self.repository.list_souls(), self.current_requirement)
+        )
+        self.add_log("已删除一条本地御魂记录；未向游戏发送任何操作。")
+
+    def read_current_scheme(self, base_speed: int = 0) -> None:
+        if self.demo_mode:
+            QMessageBox.information(
+                self,
+                "演示模式",
+                "演示数据与真实方案完全隔离；请用普通模式读取游戏方案。",
+            )
+            return
+        if self._task_running():
+            QMessageBox.information(self, "任务运行中", "请先停止任务，再读取方案。")
+            return
+        if not self._require_game_foreground("读取方案详情"):
+            return
+        cursor_active = True
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            boxes = self.runtime.capture_boxes()
+            requirement = SchemeRequirementParser().parse(
+                boxes,
+                weights=DEFAULT_PROFILES["output"],
+            )
+            requirement = self._convert_panel_thresholds(
+                requirement, base_speed=base_speed
+            )
+            summary = self._requirement_summary(requirement)
+            QApplication.restoreOverrideCursor()
+            cursor_active = False
+            answer = QMessageBox.question(
+                self,
+                "确认识别结果",
+                f"即将应用以下御魂约束：\n\n{summary}\n\n确认无误后继续。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.add_log("已取消应用本次方案识别结果。")
+                return
+            inventory = self.repository.list_souls() if self.repository else ()
+            self.refresh_state(create_state(inventory, requirement))
+            self.add_log(
+                "已从当前游戏画面读取方案约束，并用本地真实库存重新计算。"
+            )
+        except SchemeParseError as exc:
+            if cursor_active:
+                QApplication.restoreOverrideCursor()
+                cursor_active = False
+            QMessageBox.warning(self, "无法识别方案", str(exc))
+            self.add_log(f"方案读取失败：{exc}")
+        except Exception as exc:
+            if cursor_active:
+                QApplication.restoreOverrideCursor()
+                cursor_active = False
+            QMessageBox.warning(self, "读取失败", str(exc))
+            self.add_log(f"方案读取异常：{exc}")
+        finally:
+            if cursor_active:
+                QApplication.restoreOverrideCursor()

@@ -93,6 +93,10 @@ class AppRepository:
             result.append(Soul(**data))
         return result
 
+    def delete_soul(self, soul_id: str) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM souls WHERE id=?", (soul_id,))
+
     def add_audit(self, action: str, payload: dict[str, Any]) -> None:
         self.connection.execute(
             "INSERT INTO audit(created_at, action, payload) VALUES (?, ?, ?)",

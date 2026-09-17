@@ -83,6 +83,20 @@ _STAT_LABELS = (
     ("防御", Stat.DEFENSE),
 )
 
+_SOUL_DETAIL_ANCHORS = (
+    "御魂详情",
+    "御魂强化",
+    "御魂属性",
+)
+
+_SCHEME_DETAIL_ANCHORS = (
+    "方案详情",
+    "阵容助手",
+    "御魂搭配",
+    "配装方案",
+    "计算结果",
+)
+
 
 def _normalize_text(value: str) -> str:
     return (
@@ -105,9 +119,39 @@ def _parse_stat(text: str) -> tuple[Stat, float] | None:
     return None
 
 
-def _stat_from_label(text: str) -> Stat | None:
-    compact = re.sub(r"\s+", "", _normalize_text(text))
-    return next((stat for label, stat in _STAT_LABELS if label in compact), None)
+def _stats_from_label(text: str) -> frozenset[Stat]:
+    remaining = re.sub(r"\s+", "", _normalize_text(text))
+    result: list[Stat] = []
+    for label, stat in _STAT_LABELS:
+        if label not in remaining:
+            continue
+        result.append(stat)
+        remaining = remaining.replace(label, "", 1)
+    return frozenset(result)
+
+
+def _group_lines(
+    boxes: Iterable[OcrBox], *, min_confidence: float = 0.92
+) -> list[str]:
+    accepted = [box for box in boxes if box.confidence >= min_confidence]
+    ordered = sorted(accepted, key=lambda box: (box.center[1], box.bounds[0]))
+    lines: list[list[OcrBox]] = []
+    for box in ordered:
+        center_y = box.center[1]
+        height = max(1, box.bounds[3] - box.bounds[1])
+        if lines:
+            line_y = sum(item.center[1] for item in lines[-1]) / len(lines[-1])
+            if abs(center_y - line_y) <= max(8, height * 0.75):
+                lines[-1].append(box)
+                continue
+        lines.append([box])
+    return [
+        "".join(
+            _normalize_text(item.text)
+            for item in sorted(line, key=lambda item: item.bounds[0])
+        )
+        for line in lines
+    ]
 
 
 def _fingerprint(payload: Mapping[str, object]) -> str:
@@ -126,9 +170,32 @@ class SoulDetailParser:
         rarity: int,
         set_name_override: str = "",
     ) -> Soul:
-        ordered = sorted(boxes, key=lambda box: (box.bounds[1], box.bounds[0]))
+        all_boxes = list(boxes)
+        anchor = next(
+            (
+                box
+                for box in all_boxes
+                if box.confidence >= 0.92
+                and any(name in _normalize_text(box.text) for name in _SOUL_DETAIL_ANCHORS)
+            ),
+            None,
+        )
+        if anchor is None:
+            raise SoulParseError("当前画面不像御魂详情页，请手动打开详情后重试")
+
+        anchor_x = anchor.center[0]
+        panel_half_width = max(420, (anchor.bounds[2] - anchor.bounds[0]) * 2)
+        ordered = sorted(
+            (
+                box
+                for box in all_boxes
+                if abs(box.center[0] - anchor_x) <= panel_half_width
+                and box.center[1] >= anchor.bounds[1] - 12
+            ),
+            key=lambda box: (box.bounds[1], box.bounds[0]),
+        )
         texts = [_normalize_text(box.text) for box in ordered]
-        used_confidences: list[float] = []
+        used_confidences: list[float] = [anchor.confidence]
 
         set_name = set_name_override.strip()
         if not set_name:
@@ -140,15 +207,19 @@ class SoulDetailParser:
                     break
 
         level = None
+        level_bottom = None
         for box, text in zip(ordered, texts, strict=True):
             match = re.fullmatch(r"(?:强化)?\s*\+\s*([0-9]|1[0-5])", text)
             if match:
                 level = int(match.group(1))
+                level_bottom = box.bounds[3]
                 used_confidences.append(box.confidence)
                 break
 
         stats: list[tuple[Stat, float]] = []
         for box, text in zip(ordered, texts, strict=True):
+            if level_bottom is not None and box.center[1] <= level_bottom:
+                continue
             parsed = _parse_stat(text)
             if parsed is not None:
                 stats.append(parsed)
@@ -211,10 +282,17 @@ class SchemeRequirementParser:
         *,
         weights: Mapping[Stat, float],
     ) -> BuildRequirement:
-        texts = [_normalize_text(box.text) for box in boxes]
+        texts = _group_lines(boxes)
+        if not any(
+            anchor in text
+            for anchor in _SCHEME_DETAIL_ANCHORS
+            for text in texts
+        ):
+            raise SchemeParseError("当前画面不像方案详情页，请打开计算结果后重试")
         set_counts: dict[str, int] = {}
         main_stats: dict[int, frozenset[Stat]] = {}
         minimums: dict[Stat, float] = {}
+        maximums: dict[Stat, float] = {}
 
         for text in texts:
             compact = re.sub(r"\s+", "", text)
@@ -232,32 +310,44 @@ class SchemeRequirementParser:
             slot_match = re.search(r"([二四2四六6])号?位", compact)
             if slot_match:
                 slot = self._SLOT_NUMBERS.get(slot_match.group(1))
-                stat = _stat_from_label(compact[slot_match.end() :])
-                if slot is not None and stat is not None:
-                    main_stats[slot] = frozenset({stat})
+                stats = _stats_from_label(compact[slot_match.end() :])
+                if slot is not None and stats:
+                    main_stats[slot] = stats
                 continue
 
             if "满暴" in compact or "暴击满" in compact:
                 minimums[Stat.CRIT_RATE] = 100.0
 
             for label, stat in _STAT_LABELS:
-                match = re.search(
-                    rf"{re.escape(label)}(?:总值)?(?:≥|>=|>|不低于)?"
-                    rf"(\d+(?:\.\d+)?)(?:以上)?",
+                minimum_match = re.search(
+                    rf"{re.escape(label)}(?:总值)?(?:"
+                    rf"(?:≥|>=|>|不低于)(\d+(?:\.\d+)?)|"
+                    rf"(\d+(?:\.\d+)?)(?:以上))",
                     compact,
                 )
-                if match and any(
-                    marker in compact
-                    for marker in ("≥", ">=", ">", "不低于", "以上")
-                ):
-                    minimums[stat] = float(match.group(1))
+                if minimum_match:
+                    minimums[stat] = float(
+                        minimum_match.group(1) or minimum_match.group(2)
+                    )
+                    break
+                maximum_match = re.search(
+                    rf"{re.escape(label)}(?:总值)?(?:"
+                    rf"(?:≤|<=|<|不超过)(\d+(?:\.\d+)?)|"
+                    rf"(\d+(?:\.\d+)?)(?:以下))",
+                    compact,
+                )
+                if maximum_match:
+                    maximums[stat] = float(
+                        maximum_match.group(1) or maximum_match.group(2)
+                    )
                     break
 
-        if not (set_counts or main_stats or minimums):
+        if not (set_counts or main_stats or minimums or maximums):
             raise SchemeParseError("当前画面没有识别到可用的方案约束")
         return BuildRequirement(
             set_counts=set_counts,
             main_stats=main_stats,
             min_stats=minimums,
+            max_stats=maximums,
             weights=dict(weights),
         )

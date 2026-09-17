@@ -48,6 +48,8 @@ def _requirement_gap(
         penalty += max(0, needed - counts.get(set_name, 0)) / needed
     for stat, maximum in requirement.max_stats.items():
         excess = max(0.0, totals.get(stat, 0.0) - maximum)
+        if excess > 0:
+            shortfalls[stat] = -round(excess, 4)
         penalty += excess / max(abs(maximum), 1.0)
     return shortfalls, penalty
 

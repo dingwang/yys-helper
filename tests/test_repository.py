@@ -29,6 +29,24 @@ class RepositoryTests(unittest.TestCase):
         self.repo.save_souls([soul_fixture()])
         self.assertEqual([soul_fixture()], self.repo.list_souls())
 
+    def test_deletes_one_soul_without_touching_others(self):
+        first = soul_fixture()
+        second = Soul(
+            id="s-2",
+            set_name="火灵",
+            slot=4,
+            rarity=6,
+            level=0,
+            main_stat=Stat.HP_PCT,
+            main_value=10,
+            substats={Stat.SPEED: 3},
+        )
+        self.repo.save_souls([first, second])
+
+        self.repo.delete_soul(first.id)
+
+        self.assertEqual([second], self.repo.list_souls())
+
     def test_round_trips_setting(self):
         self.repo.set_setting("adb_path", "C:/MuMu/adb.exe")
         self.assertEqual("C:/MuMu/adb.exe", self.repo.get_setting("adb_path"))

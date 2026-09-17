@@ -60,6 +60,33 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(runtime.perform("select_chapter_28_hard"))
         self.assertEqual([(10, 10), (50, 50)], adb.taps)
 
+    def test_read_only_capture_does_not_replace_automation_observation(self):
+        stream = BytesIO()
+        Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+
+        class FakeAdb:
+            @staticmethod
+            def screenshot():
+                return stream.getvalue()
+
+        class SequencedOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def read(self, _image):
+                self.calls += 1
+                if self.calls == 1:
+                    return [OcrBox("探索地图", 0.99, (0, 0, 20, 20))]
+                return [OcrBox("御魂详情", 0.99, (40, 40, 60, 60))]
+
+        runtime = OcrMumuRuntime(FakeAdb(), VisionService(SequencedOcr()))
+        runtime.observe()
+
+        captured = runtime.capture_boxes()
+
+        self.assertEqual("御魂详情", captured[0].text)
+        self.assertEqual("探索地图", runtime.last_boxes[0].text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,7 +4,14 @@ from dataclasses import dataclass
 
 from collections.abc import Iterable
 
-from .domain.models import BuildRequirement, BuildResult, Soul, Stat, UpgradeCandidate, UpgradeBudget
+from .domain.models import (
+    BuildRequirement,
+    BuildResult,
+    Soul,
+    Stat,
+    UpgradeBudget,
+    UpgradeCandidate,
+)
 from .domain.optimizer import optimize_build
 from .domain.upgrade import rank_upgrade_candidates
 

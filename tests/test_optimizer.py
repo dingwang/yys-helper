@@ -67,6 +67,16 @@ class OptimizerTests(unittest.TestCase):
         result = optimize_build(souls, requirement)
         self.assertEqual(Stat.SPEED, next(s for s in result.souls if s.slot == 2).main_stat)
 
+    def test_optimizer_reports_amount_above_a_maximum_as_negative_gap(self):
+        requirement = BuildRequirement(
+            max_stats={Stat.SPEED: 5}, weights={Stat.SPEED: 1}
+        )
+
+        result = optimize_build(inventory_fixture(), requirement)
+
+        self.assertFalse(result.satisfied)
+        self.assertLess(result.shortfalls[Stat.SPEED], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

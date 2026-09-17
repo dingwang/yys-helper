@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from time import sleep
+from threading import RLock
 from typing import Callable, Iterable
 
 from PIL import Image
@@ -69,25 +70,37 @@ class OcrMumuRuntime:
         self.sleeper = sleeper
         self.last_image = None
         self.last_boxes: list[OcrBox] = []
+        self._io_lock = RLock()
+
+    def _capture(self) -> tuple[Image.Image, list[OcrBox]]:
+        png = self.adb.screenshot()
+        image = Image.open(BytesIO(png)).convert("RGB")
+        return image, list(self.vision.read(image))
+
+    def capture_boxes(self) -> tuple[OcrBox, ...]:
+        """Capture OCR for a read-only feature without changing actor state."""
+        with self._io_lock:
+            _image, boxes = self._capture()
+            return tuple(boxes)
 
     def observe(self) -> str | None:
-        png = self.adb.screenshot()
-        self.last_image = Image.open(BytesIO(png)).convert("RGB")
-        self.last_boxes = self.vision.read(self.last_image)
-        return classify_scene(self.last_boxes)
+        with self._io_lock:
+            self.last_image, self.last_boxes = self._capture()
+            return classify_scene(self.last_boxes)
 
     def perform(self, action: str) -> bool:
-        if action == "wait_battle":
-            return True
-        labels = resolve_action_text(action)
-        if action == "select_chapter_28_hard":
-            return self._perform_sequence(labels)
-        for label in labels:
-            target = self._find_label(label)
-            if target is not None:
-                self.adb.tap(*target.center)
+        with self._io_lock:
+            if action == "wait_battle":
                 return True
-        return False
+            labels = resolve_action_text(action)
+            if action == "select_chapter_28_hard":
+                return self._perform_sequence(labels)
+            for label in labels:
+                target = self._find_label(label)
+                if target is not None:
+                    self.adb.tap(*target.center)
+                    return True
+            return False
 
     def _perform_sequence(self, labels: tuple[str, ...]) -> bool:
         for index, label in enumerate(labels):

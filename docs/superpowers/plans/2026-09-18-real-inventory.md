@@ -76,4 +76,4 @@
 - [x] Document the real capture workflow, the opaque scheme-code boundary and read-only safety model.
 - [x] Run `python -m unittest discover -s tests -v`.
 - [x] Run `python -m compileall -q src tests` and `python -m pip check`.
-- [ ] Run `git diff --check`, commit, push `main`, and verify local/remote hashes match.
+- [x] Run `git diff --check`, commit, push `main`, and verify local/remote hashes match.

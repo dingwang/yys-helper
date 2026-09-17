@@ -1,0 +1,1 @@
+"""Guarded state-machine automation."""

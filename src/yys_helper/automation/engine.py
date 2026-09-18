@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from yys_helper.domain.models import StopReason, TaskLimits, TaskOutcome
+from .pacing import PacingController
 
 
 class SceneObserver(Protocol):
@@ -42,6 +43,7 @@ class Workflow:
 class CancellationToken:
     def __init__(self) -> None:
         self._event = threading.Event()
+        self._finish_event = threading.Event()
 
     def cancel(self) -> None:
         self._event.set()
@@ -51,6 +53,12 @@ class CancellationToken:
 
     def wait(self, seconds: float) -> None:
         self._event.wait(seconds)
+
+    def finish_round(self) -> None:
+        self._finish_event.set()
+
+    def finishing(self) -> bool:
+        return self._finish_event.is_set()
 
 
 class AutomationEngine:
@@ -62,12 +70,16 @@ class AutomationEngine:
         clock=time.monotonic,
         sleeper=time.sleep,
         progress=None,
+        pacing: PacingController | None = None,
+        activity=None,
     ) -> None:
         self.observer = observer
         self.actor = actor
         self.clock = clock
         self.sleeper = sleeper
         self.progress = progress or (lambda _scene, _rounds, _elapsed: None)
+        self.pacing = pacing
+        self.activity = activity or (lambda _kind, _seconds: None)
 
     def run(
         self,
@@ -77,6 +89,7 @@ class AutomationEngine:
     ) -> TaskOutcome:
         token = cancel_token or CancellationToken()
         started = self.clock()
+        deadline = started + limits.max_duration_seconds
         rounds = 0
         last_scene = "starting"
         unknown_count = 0
@@ -85,6 +98,26 @@ class AutomationEngine:
         scene_since = started
         previous_scene = None
         wait = token.wait if self.sleeper is time.sleep else self.sleeper
+
+        def interrupted():
+            elapsed = self.clock() - started
+            if token.is_cancelled():
+                return TaskOutcome(StopReason.CANCELLED, last_scene, rounds, elapsed)
+            if self.clock() >= deadline:
+                return TaskOutcome(StopReason.MAX_DURATION, last_scene, rounds, elapsed)
+            return None
+
+        def paced_wait(seconds, kind='waiting'):
+            remaining = seconds
+            while remaining > 0 and interrupted() is None:
+                if kind == 'resting' and token.finishing():
+                    return TaskOutcome(StopReason.COMPLETED, last_scene, rounds, self.clock() - started, '本轮结束，已停止。')
+                # No single wait can outlive the session deadline. Stop wakes token.wait immediately.
+                self.activity(kind, remaining)
+                chunk = min(remaining, max(0., deadline - self.clock()), 1. if self.pacing else remaining)
+                wait(chunk)
+                remaining -= chunk
+            return interrupted()
 
         while True:
             elapsed = self.clock() - started
@@ -118,7 +151,9 @@ class AutomationEngine:
                         rounds,
                         self.clock() - started,
                     )
-                wait(1.0)
+                outcome = paced_wait(self.pacing.poll_delay(1.) if self.pacing else 1.)
+                if outcome:
+                    return outcome
                 continue
 
             last_scene = scene
@@ -143,20 +178,60 @@ class AutomationEngine:
                 expected_scenes = ("__no_valid_transition__",)
                 continue
 
-            if transition.round_completed and (not workflow.track_battles or battle_open):
+            just_completed = transition.round_completed and (not workflow.track_battles or battle_open)
+            if just_completed:
                 rounds += 1
                 battle_open = False
                 self.progress(scene, rounds, elapsed)
                 if rounds >= limits.max_rounds:
                     return TaskOutcome(StopReason.MAX_ROUNDS, scene, rounds, self.clock() - started)
+            safe_boundary = just_completed or scene in ('ready', 'soul_ready', 'explore_map', 'home', 'chapter_select', 'repeat', 'settlement')
+            if token.finishing() and safe_boundary:
+                return TaskOutcome(StopReason.COMPLETED, scene, rounds, self.clock() - started, '本轮结束，已停止；不会自动续跑。')
+            if self.pacing and transition.action != 'wait_battle':
+                rest = self.pacing.rest_duration(rounds) if just_completed else 0.
+                if rest:
+                    outcome = paced_wait(rest, 'resting')
+                    if outcome:
+                        return outcome
+                outcome = paced_wait(self.pacing.action_delay(), 'thinking')
+                if outcome:
+                    return outcome
+                if token.finishing() and safe_boundary:
+                    return TaskOutcome(StopReason.COMPLETED, scene, rounds, self.clock() - started, '本轮结束，已停止。')
+                # Waiting invalidates old screenshot coordinates. Refresh before any input.
+                try:
+                    fresh_scene = self.observer.observe()
+                except Exception as exc:
+                    return TaskOutcome(StopReason.ADB_DISCONNECTED, scene, rounds, self.clock() - started, str(exc))
+                outcome = interrupted()
+                if outcome:
+                    return outcome
+                if token.finishing() and safe_boundary:
+                    return TaskOutcome(StopReason.COMPLETED, scene, rounds, self.clock() - started, '本轮结束，已停止。')
+                if fresh_scene in workflow.stop_scenes:
+                    return TaskOutcome(workflow.stop_scenes[fresh_scene], fresh_scene, rounds, self.clock() - started)
+                if fresh_scene != scene:
+                    expected_scenes = (scene,) + transition.expected_scenes
+                    continue
+                # A long boundary rest is not a stuck-page timeout.
+                if rest:
+                    scene_since = self.clock()
             # A completed last round must never press "challenge again".
             if token.is_cancelled():
                 return TaskOutcome(StopReason.CANCELLED, scene, rounds, self.clock() - started)
+            if token.finishing() and safe_boundary:
+                return TaskOutcome(StopReason.COMPLETED, scene, rounds, self.clock() - started, '本轮结束，已停止。')
             try:
                 performed = self.actor.perform(transition.action)
             except Exception as exc:
                 return TaskOutcome(StopReason.ACTION_FAILED, scene, rounds, self.clock() - started, str(exc))
+            outcome = interrupted()
+            if outcome:
+                return outcome
             if not performed:
+                if token.finishing() and safe_boundary:
+                    return TaskOutcome(StopReason.COMPLETED, scene, rounds, self.clock() - started, '本轮结束，已停止。')
                 return TaskOutcome(
                     StopReason.ACTION_FAILED,
                     scene,
@@ -165,5 +240,8 @@ class AutomationEngine:
                     transition.action,
                 )
             if transition.poll_delay_seconds > 0:
-                wait(transition.poll_delay_seconds)
+                delay = self.pacing.poll_delay(transition.poll_delay_seconds) if self.pacing else transition.poll_delay_seconds
+                outcome = paced_wait(delay)
+                if outcome:
+                    return outcome
             expected_scenes = transition.expected_scenes

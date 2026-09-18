@@ -121,12 +121,15 @@ class UpgradeCandidate:
 @dataclass(frozen=True, slots=True)
 class TaskLimits:
     max_rounds: int = 50
-    max_duration_seconds: float = 3600.0
+    max_duration_seconds: float = 2700.0
     min_stamina: int = 0
 
     def __post_init__(self) -> None:
-        if self.max_rounds <= 0 or self.max_duration_seconds <= 0:
-            raise ValueError("task limits must be positive")
+        from math import isfinite
+        if type(self.max_rounds) is not int or not 1 <= self.max_rounds <= 500:
+            raise ValueError('循环上限必须为 1–500 轮')
+        if not isfinite(self.max_duration_seconds) or not 0 < self.max_duration_seconds <= 7200:
+            raise ValueError('单次挂机时间必须大于 0 且不超过 120 分钟')
 
 
 @dataclass(frozen=True, slots=True)

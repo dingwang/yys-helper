@@ -119,6 +119,9 @@ class OcrMumuRuntime:
         self.last_capture_error: str | None = None
         self._io_lock = RLock()
         self.task_profile: TaskProfile | None = None
+        self.pacing = None
+        self.input_guard = None
+        self.last_scene = None
 
     def _capture_with_png(self) -> tuple[bytes, Image.Image, list[OcrBox]]:
         png = self.adb.screenshot()
@@ -168,8 +171,10 @@ class OcrMumuRuntime:
                 self.last_capture_error = str(exc)
                 raise
             if self.task_profile is not None:
-                return classify_task_scene(self.last_boxes, self.task_profile)
-            return classify_scene(self.last_boxes)
+                self.last_scene = classify_task_scene(self.last_boxes, self.task_profile)
+            else:
+                self.last_scene = classify_scene(self.last_boxes)
+            return self.last_scene
 
     def perform(self, action: str) -> bool:
         with self._io_lock:
@@ -183,16 +188,14 @@ class OcrMumuRuntime:
                 # Ambiguous buttons need a better profile, never a guessed tap.
                 if len(candidates) != 1:
                     return False
-                self.adb.tap(*candidates[0].center)
-                return True
+                return self._tap(candidates[0])
             labels = resolve_action_text(action)
             if action == "select_chapter_28_hard":
                 return self._perform_sequence(labels)
             for label in labels:
                 target = self._find_label(label)
                 if target is not None:
-                    self.adb.tap(*target.center)
-                    return True
+                    return self._tap(target)
             return False
 
     def _perform_sequence(self, labels: tuple[str, ...]) -> bool:
@@ -200,10 +203,22 @@ class OcrMumuRuntime:
             target = self._find_label(label)
             if target is None:
                 return False
-            self.adb.tap(*target.center)
+            if not self._tap(target):
+                return False
             if index < len(labels) - 1:
-                self.sleeper(1.0)
+                self.sleeper(self.pacing.poll_delay(1.) if self.pacing else 1.)
+                if self.input_guard and not self.input_guard():
+                    return False
                 self.observe()
+        return True
+
+    def _tap(self, target: OcrBox) -> bool:
+        if self.input_guard and not self.input_guard():
+            return False
+        point = self.pacing.point(target.bounds) if self.pacing else target.center
+        if self.last_image is not None and not (0 <= point[0] < self.last_image.width and 0 <= point[1] < self.last_image.height):
+            return False
+        self.adb.tap(*point)
         return True
 
     def _find_label(self, label: str) -> OcrBox | None:

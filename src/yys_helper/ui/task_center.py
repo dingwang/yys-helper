@@ -1,13 +1,14 @@
 """Task selection and offline screenshot calibration. Never sends device input."""
 from pathlib import Path
 import sqlite3
+import time
 
 from PIL import Image
-from PySide6.QtCore import QThread, Qt, Signal
+from PySide6.QtCore import QThread, Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QLineEdit,
     QListWidget, QListWidgetItem, QComboBox, QSpinBox, QCheckBox,
-    QPushButton, QFormLayout, QProgressBar, QFileDialog, QScrollArea,
+    QPushButton, QFormLayout, QProgressBar, QFileDialog, QScrollArea, QMessageBox,
 )
 
 from yys_helper.automation.catalog import TASKS, TaskProfile
@@ -52,10 +53,16 @@ class ScreenshotCheck(QThread):
 
 class TaskCenterPage(QWidget):
     start_requested = Signal(str, int, int)
+    stop_requested = Signal()
+    finish_requested = Signal()
 
-    def __init__(self, repository=None):
+    def __init__(self, repository=None, *, demo_mode=False):
         super().__init__()
         self.repository = repository
+        self.demo_mode = demo_mode
+        self._connected = False
+        self._started_at = None
+        self._check_text = ''
         self._task_active = False
         self.check_worker = None
         self._profiles = {}
@@ -63,9 +70,9 @@ class TaskCenterPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(26, 22, 26, 20)
         outer.setSpacing(14)
-        title = QLabel('让重复的事，自动完成。')
+        title = QLabel('任务中心')
         title.setObjectName('title')
-        subtitle = QLabel('任务中心  /  选择玩法，确认识别，再开始循环')
+        subtitle = QLabel('01 选择玩法    →    02 设置节奏与上限    →    03 识别后运行')
         subtitle.setObjectName('muted')
         outer.addWidget(title)
         outer.addWidget(subtitle)
@@ -73,7 +80,7 @@ class TaskCenterPage(QWidget):
         body.setSpacing(18)
         outer.addLayout(body, 1)
         library, left = panel()
-        library.setFixedWidth(244)
+        library.setFixedWidth(220)
         left.addWidget(QLabel('玩法资料库'))
         self.search = QLineEdit()
         self.search.setPlaceholderText('搜索玩法…')
@@ -119,8 +126,8 @@ class TaskCenterPage(QWidget):
         self.rounds.setValue(self._saved_number('task_rounds', 30, 500))
         self.rounds.setSuffix(' 轮')
         self.minutes = QSpinBox()
-        self.minutes.setRange(1, 720)
-        self.minutes.setValue(self._saved_number('task_minutes', 60, 720))
+        self.minutes.setRange(1, 120)
+        self.minutes.setValue(self._saved_number('task_minutes', 45, 120))
         self.minutes.setSuffix(' 分钟')
         controls.addWidget(QLabel('最多'))
         controls.addWidget(self.rounds)
@@ -128,15 +135,33 @@ class TaskCenterPage(QWidget):
         controls.addWidget(self.minutes)
         controls.addStretch()
         overview_layout.addWidget(self.settings)
+        self.pace_mode = QComboBox()
+        self.pace_mode.addItem('标准节奏 · 每 8–12 轮休息 20–45 秒', 'standard')
+        self.pace_mode.addItem('舒缓节奏 · 每 5–8 轮休息 30–60 秒', 'relaxed')
+        saved_pace = self.repository.get_setting('task_pace', 'standard') if self.repository else 'standard'
+        self.pace_mode.setCurrentIndex(max(0, self.pace_mode.findData(saved_pace)))
+        overview_layout.addWidget(self.pace_mode)
+        self.session_hint = QLabel()
+        self.session_hint.setObjectName('muted')
+        self.session_hint.setWordWrap(True)
+        overview_layout.addWidget(self.session_hint)
         right.addWidget(overview)
 
         self.config_panel, config = panel()
-        config.addWidget(QLabel('识别配置'))
+        config.addWidget(QLabel('关卡识别'))
         tip = QLabel('填写画面中的原文，多个词用 / 分隔。标题可包含匹配，按钮需完整匹配。')
         tip.setObjectName('muted')
         tip.setWordWrap(True)
         config.addWidget(tip)
-        form = QFormLayout()
+        title_form = QFormLayout()
+        config.addLayout(title_form)
+        self.advanced_toggle = QPushButton('高级识别设置  ›')
+        self.advanced_toggle.setCheckable(True)
+        config.addWidget(self.advanced_toggle)
+        self.advanced = QWidget()
+        self.advanced.setObjectName('transparent')
+        form = QFormLayout(self.advanced)
+        form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(8)
         self.fields = {}
         for key, label in [('title', '关卡标题'), ('start', '挑战按钮'), ('prepare', '准备按钮'),
@@ -144,8 +169,11 @@ class TaskCenterPage(QWidget):
             edit = QLineEdit()
             edit.setMaxLength(480)
             self.fields[key] = edit
-            form.addRow(label, edit)
-        config.addLayout(form)
+            (title_form if key == 'title' else form).addRow(label, edit)
+        self.advanced.hide()
+        self.advanced_toggle.toggled.connect(self.advanced.setVisible)
+        self.advanced_toggle.toggled.connect(lambda opened: self.advanced_toggle.setText('高级识别设置  ﹀' if opened else '高级识别设置  ›'))
+        config.addWidget(self.advanced)
         buttons = QHBoxLayout()
         self.save_button = QPushButton('保存配置')
         self.reset_button = QPushButton('恢复预设')
@@ -155,9 +183,18 @@ class TaskCenterPage(QWidget):
         config.addLayout(buttons)
         right.addWidget(self.config_panel)
         run_panel, run = panel()
+        self.readiness = QLabel()
+        self.readiness.setObjectName('statusPill')
+        self.readiness.setWordWrap(True)
         self.preflight = QPushButton('导入截图预检')
         self.preflight.setToolTip('仅读取本地截图，不连接 MuMu、不发送点击。')
-        run.addWidget(self.preflight)
+        check_row = QHBoxLayout()
+        check_row.addWidget(self.preflight)
+        self.check_details = QPushButton('识别详情')
+        self.check_details.setEnabled(False)
+        self.check_details.clicked.connect(lambda: QMessageBox.information(self, '本地截图识别', self._check_text))
+        check_row.addWidget(self.check_details)
+        run.addLayout(check_row)
         self.check_result = QLabel('启动时会再次预检。新增玩法需从所选关卡的挑战页开始。')
         self.check_result.setObjectName('muted')
         self.check_result.setWordWrap(True)
@@ -166,12 +203,29 @@ class TaskCenterPage(QWidget):
         self.risk_ack = QCheckBox('我理解自动操作可能带来账号处罚风险')
         self.risk_ack.setObjectName('riskCheck')
         run.addWidget(self.risk_ack)
+        right.addWidget(run_panel)
+        control_panel, run = panel()
+        run.setContentsMargins(16, 12, 16, 12)
+        run.setSpacing(8)
+        run.addWidget(self.readiness)
         self.start_button = QPushButton('开始循环')
         self.start_button.setObjectName('primary')
         self.start_button.setMinimumHeight(42)
         self.start_button.setEnabled(False)
         self.task_buttons = [self.start_button]
-        run.addWidget(self.start_button)
+        stop_row = QHBoxLayout()
+        self.finish_button = QPushButton('本轮后停止')
+        self.finish_button.setToolTip('等待当前战斗结束，不再开始下一轮。时长上限始终优先。')
+        self.stop_button = QPushButton('立即停止')
+        self.stop_button.setObjectName('danger')
+        self.finish_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self.finish_button.clicked.connect(self.finish_requested.emit)
+        self.stop_button.clicked.connect(self.stop_requested.emit)
+        stop_row.addWidget(self.start_button, 1)
+        stop_row.addWidget(self.finish_button)
+        stop_row.addWidget(self.stop_button)
+        run.addLayout(stop_row)
         self.progress = QProgressBar()
         self.progress.setRange(0, self.rounds.value())
         self.progress.setValue(0)
@@ -182,7 +236,14 @@ class TaskCenterPage(QWidget):
         self.status.setObjectName('muted')
         self.status.setWordWrap(True)
         run.addWidget(self.status)
-        right_shell.addWidget(run_panel)
+        self.activity_label = QLabel('不自动续跑 · 等待与休息均计入总时长')
+        self.activity_label.setObjectName('muted')
+        run.addWidget(self.activity_label)
+        self.countdown = QLabel()
+        self.countdown.setObjectName('muted')
+        self.countdown.hide()
+        run.addWidget(self.countdown)
+        right_shell.addWidget(control_panel)
         right.addStretch()
         self.search.textChanged.connect(self._filter)
         self.category.currentTextChanged.connect(self._filter)
@@ -192,7 +253,31 @@ class TaskCenterPage(QWidget):
         self.reset_button.clicked.connect(self._reset)
         self.start_button.clicked.connect(self._start)
         self.preflight.clicked.connect(self._check_screenshot)
+        self.minutes.valueChanged.connect(self._session_summary)
+        self.rounds.valueChanged.connect(self._session_summary)
+        for edit in self.fields.values():
+            edit.textChanged.connect(self._update_enabled)
+        self.timer = QTimer(self)
+        self.timer.setInterval(1000)
+        self.timer.timeout.connect(self._tick)
+        self._session_summary()
         self._filter()
+
+    def _session_summary(self, *_):
+        self.session_hint.setText(f'先到即停：{self.rounds.value()} 轮 / {self.minutes.value()} 分钟。随机节奏不代表防封。')
+
+    def set_connected(self, connected):
+        self._connected = connected
+        self._update_enabled()
+
+    def _tick(self):
+        if self._started_at is not None:
+            remaining = max(0, self.minutes.value() * 60 - int(time.monotonic() - self._started_at))
+            self.countdown.setText(f'会话剩余上限  {remaining // 60:02d}:{remaining % 60:02d}  · 到时停止发送新操作')
+
+    def update_activity(self, kind, seconds):
+        names = {'resting': '阶段休息', 'thinking': '操作间隔', 'waiting': '等待画面'}
+        self.activity_label.setText(f'{names.get(kind, kind)} · {max(0, seconds):.0f} 秒')
 
     def _saved_number(self, key, fallback, upper):
         try:
@@ -258,7 +343,8 @@ class TaskCenterPage(QWidget):
     def save_settings(self):
         try:
             profile = self.current_profile()
-            settings = {'task_rounds': str(self.rounds.value()), 'task_minutes': str(self.minutes.value())}
+            settings = {'task_rounds': str(self.rounds.value()), 'task_minutes': str(self.minutes.value()),
+                        'task_pace': self.pace_mode.currentData()}
             if profile:
                 settings['task_profile_' + self.selected_task.id] = profile.to_json()
             if self.repository:
@@ -279,20 +365,60 @@ class TaskCenterPage(QWidget):
 
     def _update_enabled(self, *_):
         checking = self.check_worker and self.check_worker.isRunning()
-        self.start_button.setEnabled(self.risk_ack.isChecked() and not self._task_active and not checking and self.task_list.count() > 0)
+        problem = ''
+        try:
+            profile = self.current_profile()
+            if profile and '请填写' in ''.join(profile.title):
+                problem = '请填写本期具体关卡标题'
+        except ValueError as exc:
+            problem = str(exc)
+        ready = self._connected and not self.demo_mode and not problem and self.task_list.count() > 0
+        self.start_button.setEnabled(bool(ready and self.risk_ack.isChecked() and not self._task_active and not checking))
+        if self._task_active:
+            hint = '运行中 · 设置已锁定'
+        elif self.demo_mode:
+            hint = '演示模式 · 不会向游戏发送操作'
+        elif not self.task_list.count():
+            hint = '没有匹配玩法 · 请修改搜索条件'
+        elif problem:
+            hint = problem
+        elif not self._connected:
+            hint = '未连接 MuMu · 可先配置和预检截图'
+        elif checking:
+            hint = '正在预检本地截图…'
+        elif not self.risk_ack.isChecked():
+            hint = '已连接 · 请确认游戏前台与账号风险'
+        else:
+            hint = '可以开始 · 首次运行建议先测试 1–3 轮'
+        self.readiness.setText(hint)
 
     def set_task_active(self, active):
         self._task_active = active
         for widget in (self.settings, self.task_list, self.search, self.category,
                        self.config_panel, self.risk_ack, self.preflight):
             widget.setEnabled(not active)
+        self.pace_mode.setEnabled(not active)
+        self.stop_button.setEnabled(active)
+        self.finish_button.setEnabled(active)
+        self.start_button.setText('运行中…' if active else '开始循环')
+        self.countdown.setVisible(active)
         self._update_enabled()
         if active:
+            self._started_at = time.monotonic()
+            self.timer.start()
+            self._tick()
             self.progress.setRange(0, self.rounds.value())
             self.progress.setValue(0)
             self.status.setText('识别预检中 · 未发送点击')
+        else:
+            self.timer.stop()
+            self._started_at = None
+            self.countdown.clear()
+            self.activity_label.setText('已停止 · 不会自动续跑')
 
     def _start(self):
+        if not self.start_button.isEnabled():
+            return
         if self.save_settings():
             self.start_requested.emit(self.selected_task.id, self.rounds.value(), self.minutes.value())
 
@@ -317,9 +443,15 @@ class TaskCenterPage(QWidget):
         self.check_worker = ScreenshotCheck(Path(filename), profile, self)
         for widget in (self.task_list, self.search, self.category, self.config_panel):
             widget.setEnabled(False)
-        self.check_worker.result.connect(self.check_result.setText)
+        self.check_worker.result.connect(self._show_check_result)
         self.check_worker.finished.connect(self._check_finished)
         self.check_worker.start()
+        self._update_enabled()
+
+    def _show_check_result(self, result):
+        self._check_text = result
+        self.check_result.setText(result.split('\n')[0])
+        self.check_details.setEnabled(True)
 
     def _check_finished(self):
         for widget in (self.task_list, self.search, self.category, self.config_panel):

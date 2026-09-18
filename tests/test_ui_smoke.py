@@ -50,6 +50,64 @@ class UiSmokeTests(unittest.TestCase):
         page.max_souls.setValue(1)
         self.assertEqual(1, page.table.rowCount())
 
+    def test_inventory_search_hides_nonmatching_records_and_clears_hidden_selection(self):
+        page = self.window.inventory_page
+        page.table.selectRow(0)
+        page.search.setText('不存在的套装')
+        self.assertTrue(all(page.table.isRowHidden(row) for row in range(page.table.rowCount())))
+        self.assertEqual('', page.selected_soul_id())
+        self.assertIn('0', page.filter_summary.text())
+        page.search.clear()
+        self.assertTrue(all(not page.table.isRowHidden(row) for row in range(page.table.rowCount())))
+
+    def test_excessive_duration_is_rejected_before_querying_device(self):
+        class GuardAdb:
+            def current_package(self):
+                raise AssertionError('invalid settings must not reach device')
+        class Runtime:
+            adb = GuardAdb()
+        self.window.demo_mode = False
+        self.window.runtime = Runtime()
+        self.window.dailies_page.risk_ack.setChecked(True)
+        with patch('yys_helper.ui.main_window.QMessageBox.information'):
+            self.window.start_task('chapter28', 10, 121)
+        self.assertIsNone(self.window.worker)
+
+    def test_old_worker_finish_does_not_unlock_new_session(self):
+        old_worker, current_worker = object(), object()
+        self.window.worker = current_worker
+        self.window._set_task_active(True)
+        self.window._worker_finished(old_worker)
+        self.assertFalse(self.window.dailies_page.rounds.isEnabled())
+        self.window._worker_finished(current_worker)
+        self.assertTrue(self.window.dailies_page.rounds.isEnabled())
+        self.window.worker = None
+
+    def test_worker_notifications_update_ui_only_on_gui_thread(self):
+        import time
+        from PySide6.QtCore import QThread
+        from yys_helper.application.runtime import OcrMumuRuntime
+        from tests.test_activity_replay import ReplayAdb, ReplayVision
+        self.window.demo_mode = False
+        self.window.runtime = OcrMumuRuntime(ReplayAdb(), ReplayVision([]))
+        self.window.dailies_page.risk_ack.setChecked(True)
+        observed_threads = []
+        original = self.window._task_completed
+        def completed(result):
+            observed_threads.append(QThread.currentThread() == self.app.thread())
+            original(result)
+        self.window._task_completed = completed
+        self.window.start_task('chapter28', 1, 1)
+        self.window.cancel_token.cancel()
+        deadline = time.monotonic() + 5
+        while self.window._session_active and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(.005)
+        self.window.worker.wait(1000)
+        self.assertEqual([True], observed_threads)
+        self.assertFalse(self.window._session_active)
+        self.assertEqual([], self.window.runtime.adb.taps)
+
     def test_invalid_scheme_does_not_reach_clipboard(self):
         QApplication.clipboard().setText("sentinel")
         with patch("yys_helper.ui.main_window.QMessageBox.warning"):
@@ -57,6 +115,7 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual("sentinel", QApplication.clipboard().text())
 
     def test_task_does_not_start_when_game_is_not_foreground(self):
+        self.window.demo_mode = False
         class LauncherAdb:
             @staticmethod
             def current_package():
@@ -682,6 +741,8 @@ class UiSmokeTests(unittest.TestCase):
         )
 
     def test_daily_buttons_require_explicit_risk_acknowledgement(self):
+        self.window.dailies_page.demo_mode = False
+        self.window.dailies_page.set_connected(True)
         self.assertTrue(
             all(not button.isEnabled() for button in self.window.dailies_page.task_buttons)
         )

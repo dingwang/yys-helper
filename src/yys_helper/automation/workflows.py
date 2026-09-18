@@ -24,6 +24,7 @@ def chapter_28_workflow() -> Workflow:
             "settlement": Transition("confirm", ("explore_map",), round_completed=True, poll_delay_seconds=2.0),
         },
         stop_scenes=dict(COMMON_STOPS),
+        track_battles=True,
     )
 
 
@@ -39,4 +40,5 @@ def soul_dungeon_workflow() -> Workflow:
             ),
         },
         stop_scenes=dict(COMMON_STOPS),
+        track_battles=True,
     )

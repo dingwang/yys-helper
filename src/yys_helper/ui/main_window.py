@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -55,6 +56,7 @@ from yys_helper.application.schemes import (
 )
 from yys_helper.automation.engine import AutomationEngine, CancellationToken
 from yys_helper.automation.catalog import get_task, workflow_for
+from yys_helper.automation.pacing import PacingController, PacingPolicy
 from yys_helper.ui.task_center import TaskCenterPage
 from yys_helper.demo import DemoState, create_state
 from yys_helper.domain.models import BuildRequirement, Stat, StopReason, TaskLimits, UpgradeBudget
@@ -369,6 +371,19 @@ class InventoryPage(QWidget):
         capture_layout.addWidget(self.capture_status)
         layout.addWidget(capture_card)
 
+        filters = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('搜索套装、主属性或保护状态…')
+        self.search.setClearButtonEnabled(True)
+        self.protection_filter = QComboBox()
+        self.protection_filter.addItems(['全部状态', '已保护', '待复核', '可评估'])
+        self.filter_summary = QLabel()
+        self.filter_summary.setObjectName('muted')
+        filters.addWidget(self.search, 1)
+        filters.addWidget(self.protection_filter)
+        filters.addWidget(self.filter_summary)
+        layout.addLayout(filters)
+
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
             ["套装", "位置", "星级", "等级", "主属性", "速度", "输出分", "保护状态"]
@@ -380,6 +395,8 @@ class InventoryPage(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._update_record_buttons)
+        self.search.textChanged.connect(self._filter_rows)
+        self.protection_filter.currentTextChanged.connect(self._filter_rows)
         self.populate(demo, demo_mode=demo_mode)
         layout.addWidget(self.table, 1)
         self.set_live_enabled(not demo_mode)
@@ -414,6 +431,22 @@ class InventoryPage(QWidget):
             self.capture_status.setText(f"已采集 {len(demo.inventory)} 枚真实御魂 · 数据仅保存在本机")
         else:
             self.capture_status.setText("尚未采集真实御魂")
+        self._update_record_buttons()
+        self._filter_rows()
+
+    def _filter_rows(self, *_):
+        query = self.search.text().strip().casefold()
+        state = self.protection_filter.currentText()
+        shown = 0
+        for row in range(self.table.rowCount()):
+            texts = [self.table.item(row, col).text() if self.table.item(row, col) else '' for col in range(self.table.columnCount())]
+            visible = query in ' '.join(texts).casefold() and (state == '全部状态' or texts[7] == state)
+            self.table.setRowHidden(row, not visible)
+            shown += int(visible)
+        if self.table.currentRow() >= 0 and self.table.isRowHidden(self.table.currentRow()):
+            self.table.clearSelection()
+            self.table.setCurrentCell(-1, -1)
+        self.filter_summary.setText(f'{shown} / {self.table.rowCount()} 枚')
         self._update_record_buttons()
 
     def selected_soul_id(self) -> str:
@@ -536,6 +569,7 @@ class TaskWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
     progress = Signal(str, int, float)
+    activity = Signal(str, float)
 
     def __init__(
         self,
@@ -544,6 +578,7 @@ class TaskWorker(QThread):
         limits: TaskLimits,
         token: CancellationToken,
         profile=None,
+        pace_mode='standard',
     ):
         super().__init__()
         self.runtime = runtime
@@ -551,14 +586,22 @@ class TaskWorker(QThread):
         self.limits = limits
         self.token = token
         self.profile = profile
+        self.pace_mode = pace_mode
 
     def run(self) -> None:
+        previous = (self.runtime.pacing, self.runtime.input_guard, self.runtime.sleeper)
         try:
+            self.deadline = time.monotonic() + self.limits.max_duration_seconds
+            pacing = PacingController(PacingPolicy.for_mode(self.pace_mode))
+            self.runtime.pacing = pacing
+            self.runtime.input_guard = self._input_allowed
+            self.runtime.sleeper = lambda seconds: self.token.wait(min(seconds, max(0., self.deadline - time.monotonic())))
             workflow = workflow_for(self.mode)
             self.runtime.task_profile = self.profile
             self._first_observation = True
             self.progress.emit('starting', 0, 0.)
-            result = AutomationEngine(self, self.runtime, progress=self.progress.emit).run(
+            result = AutomationEngine(self, self.runtime, progress=self.progress.emit,
+                                      pacing=pacing, activity=self.activity.emit).run(
                 workflow, self.limits, self.token
             )
             self.completed.emit(result)
@@ -566,6 +609,18 @@ class TaskWorker(QThread):
             self.failed.emit(str(exc))
         finally:
             self.runtime.task_profile = None
+            self.runtime.pacing, self.runtime.input_guard, self.runtime.sleeper = previous
+
+    def _input_allowed(self):
+        if self.token.is_cancelled() or time.monotonic() >= self.deadline:
+            return False
+        if self.token.finishing() and self.runtime.last_scene in ('ready', 'soul_ready', 'explore_map', 'home', 'chapter_select', 'repeat', 'settlement'):
+            return False
+        package = self.runtime.adb.current_package()
+        if self.token.finishing() and self.runtime.last_scene in ('ready', 'soul_ready', 'explore_map', 'home', 'chapter_select', 'repeat', 'settlement'):
+            return False
+        return bool(package and 'onmyoji' in package.lower()
+                    and not self.token.is_cancelled() and time.monotonic() < self.deadline)
 
     def observe(self):
         package = self.runtime.adb.current_package()
@@ -596,6 +651,7 @@ class MainWindow(QMainWindow):
         )
         self.runtime: OcrMumuRuntime | None = None
         self.worker: TaskWorker | None = None
+        self._session_active = False
         self.cancel_token = CancellationToken()
         self.setWindowTitle("御魂匠 · 阴阳师助手")
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "app-icon.png"
@@ -642,7 +698,7 @@ class MainWindow(QMainWindow):
         self.scheme_page = SchemePage(demo, demo_mode=demo_mode)
         self.inventory_page = InventoryPage(demo, demo_mode=demo_mode)
         self.upgrade_page = UpgradePage(demo)
-        self.dailies_page = TaskCenterPage(repository)
+        self.dailies_page = TaskCenterPage(repository, demo_mode=demo_mode)
         pages = [
             ("总览", self.dashboard),
             ("方案配装", self.scheme_page),
@@ -725,6 +781,8 @@ class MainWindow(QMainWindow):
             self.open_diagnostics_directory
         )
         self.dailies_page.start_requested.connect(self.start_task)
+        self.dailies_page.stop_requested.connect(self.stop_task)
+        self.dailies_page.finish_requested.connect(self.finish_task)
         self.dashboard.navigate_requested.connect(self._navigate)
         for index in range(5):
             QShortcut(QKeySequence(f'Ctrl+{index + 1}'), self, activated=lambda value=index: self._navigate(value))
@@ -746,9 +804,10 @@ class MainWindow(QMainWindow):
             self.repository.add_audit("ui_log", {"message": message})
 
     def _task_running(self) -> bool:
-        return bool(self.worker and self.worker.isRunning())
+        return self._session_active or bool(self.worker and self.worker.isRunning())
 
     def _set_task_active(self, active: bool) -> None:
+        self._session_active = active
         self.connect_button.setEnabled(not active and not self.demo_mode)
         self.scheme_page.set_live_enabled(not active)
         self.inventory_page.set_live_enabled(not active)
@@ -826,6 +885,7 @@ class MainWindow(QMainWindow):
             adb = AdbClient(candidates[0], preferred)
             png = adb.screenshot()
             self.runtime = OcrMumuRuntime(adb, VisionService(RapidOcrEngine()))
+            self.dailies_page.set_connected(True)
             self.dashboard.set_screenshot(png)
             if self.repository is not None:
                 self.repository.set_setting("adb_path", candidates[0])
@@ -862,7 +922,7 @@ class MainWindow(QMainWindow):
         if self.runtime is None:
             QMessageBox.information(self, "尚未连接", "请先连接 MuMu，并把游戏停在可识别的入口页面。")
             return
-        if self.worker and self.worker.isRunning():
+        if self._task_running():
             QMessageBox.information(self, "任务运行中", "请先停止当前任务。")
             return
         if not self.dailies_page.risk_ack.isChecked():
@@ -872,6 +932,20 @@ class MainWindow(QMainWindow):
                 "自动刷图可能违反游戏规则。请先阅读并勾选风险确认。",
             )
             self.add_log("自动任务未启动：尚未确认账号风险。")
+            return
+        if self.demo_mode:
+            self.add_log('演示模式禁止启动真实任务。')
+            return
+        try:
+            limits = TaskLimits(max_rounds=rounds, max_duration_seconds=minutes * 60)
+            task = get_task(mode)
+            profile = self.dailies_page.current_profile() if task.profile else None
+            if task.profile and self.dailies_page.selected_task.id != mode:
+                raise ValueError('任务与识别配置不一致，请重新选择玩法。')
+            if profile and '请填写' in ''.join(profile.title):
+                raise ValueError('请先填写本期关卡标题，并导入截图预检。')
+        except ValueError as exc:
+            QMessageBox.information(self, '请检查任务配置', str(exc))
             return
         try:
             foreground_package = self.runtime.adb.current_package()
@@ -884,23 +958,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "游戏未在前台", message)
             self.add_log(message)
             return
-        try:
-            task = get_task(mode)
-            profile = self.dailies_page.current_profile() if task.profile else None
-            if task.profile and self.dailies_page.selected_task.id != mode:
-                raise ValueError('任务与识别配置不一致，请重新选择玩法。')
-            if profile and '请填写' in ''.join(profile.title):
-                raise ValueError('请先填写本期关卡标题，并导入截图预检。')
-        except ValueError as exc:
-            QMessageBox.information(self, '请检查任务配置', str(exc))
-            return
         self.cancel_token = CancellationToken()
-        limits = TaskLimits(max_rounds=rounds, max_duration_seconds=minutes * 60)
-        self.worker = TaskWorker(self.runtime, mode, limits, self.cancel_token, profile)
-        self.worker.progress.connect(self.dailies_page.update_progress)
-        self.worker.completed.connect(self._task_completed)
-        self.worker.failed.connect(self._task_failed)
-        self.worker.finished.connect(lambda: self._set_task_active(False))
+        self.worker = TaskWorker(self.runtime, mode, limits, self.cancel_token, profile,
+                                 pace_mode=self.dailies_page.pace_mode.currentData())
+        worker = self.worker
+        worker.progress.connect(lambda scene, count, elapsed, owner=worker: self._worker_progress(owner, scene, count, elapsed))
+        worker.activity.connect(lambda kind, seconds, owner=worker: self._worker_activity(owner, kind, seconds))
+        worker.completed.connect(lambda result, owner=worker: self._worker_result(owner, result))
+        worker.failed.connect(lambda message, owner=worker: self._worker_error(owner, message))
+        worker.finished.connect(lambda owner=worker: self._worker_finished(owner))
         self._set_task_active(True)
         try:
             self.worker.start()
@@ -914,8 +980,35 @@ class MainWindow(QMainWindow):
         self.cancel_token.cancel()
         self.add_log("已请求紧急停止；不会再发送新的点击。")
 
+    def _worker_progress(self, owner, scene, count, elapsed):
+        if self.worker is owner:
+            self.dailies_page.update_progress(scene, count, elapsed)
+
+    def _worker_activity(self, owner, kind, seconds):
+        if self.worker is owner:
+            self.dailies_page.update_activity(kind, seconds)
+
+    def _worker_result(self, owner, result):
+        if self.worker is owner:
+            self._task_completed(result)
+
+    def _worker_error(self, owner, message):
+        if self.worker is owner:
+            self._task_failed(message)
+
+    def _worker_finished(self, owner):
+        if self.worker is owner:
+            self._set_task_active(False)
+
+    def finish_task(self) -> None:
+        if not self._task_running():
+            return
+        self.cancel_token.finish_round()
+        self.dailies_page.finish_button.setEnabled(False)
+        self.dailies_page.readiness.setText('已请求本轮后停止 · 时长上限仍优先')
+        self.add_log('已请求本轮后停止：等待当前战斗结束，不再开始下一场。')
+
     def _task_completed(self, result) -> None:
-        self._set_task_active(False)
         self.dailies_page.update_progress(result.final_state, result.rounds, result.elapsed_seconds)
         reasons = {StopReason.MAX_ROUNDS: '已达到轮数上限', StopReason.MAX_DURATION: '已达到时长上限',
                    StopReason.CANCELLED: '已停止', StopReason.UNRECOGNIZED_SCENE: '画面未识别，已停止',
@@ -946,7 +1039,6 @@ class MainWindow(QMainWindow):
         )
 
     def _task_failed(self, message: str) -> None:
-        self._set_task_active(False)
         self.dailies_page.status.setText(f'已停止 · {message}')
         evidence_note = ""
         if (

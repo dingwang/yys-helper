@@ -83,6 +83,15 @@ class AppRepository:
                     (soul.id, self._soul_payload(soul)),
                 )
 
+    def replace_souls(self, souls: Iterable[Soul]) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM souls")
+            for soul in souls:
+                self.connection.execute(
+                    "INSERT INTO souls(id, payload) VALUES (?, ?)",
+                    (soul.id, self._soul_payload(soul)),
+                )
+
     def list_souls(self) -> list[Soul]:
         rows = self.connection.execute("SELECT payload FROM souls ORDER BY id").fetchall()
         result: list[Soul] = []

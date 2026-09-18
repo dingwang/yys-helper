@@ -29,6 +29,29 @@ class RepositoryTests(unittest.TestCase):
         self.repo.save_souls([soul_fixture()])
         self.assertEqual([soul_fixture()], self.repo.list_souls())
 
+    def test_replace_souls_is_atomic_when_input_iteration_fails(self):
+        original = soul_fixture()
+        replacement = Soul(
+            id="replacement",
+            set_name="火灵",
+            slot=6,
+            rarity=6,
+            level=0,
+            main_stat=Stat.CRIT_RATE,
+            main_value=10,
+            substats={Stat.SPEED: 3},
+        )
+        self.repo.save_souls([original])
+
+        def broken_import():
+            yield replacement
+            raise RuntimeError("broken source")
+
+        with self.assertRaisesRegex(RuntimeError, "broken source"):
+            self.repo.replace_souls(broken_import())
+
+        self.assertEqual([original], self.repo.list_souls())
+
     def test_deletes_one_soul_without_touching_others(self):
         first = soul_fixture()
         second = Soul(

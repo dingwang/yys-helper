@@ -10,7 +10,9 @@ from yys_helper.infrastructure.vision import OcrBox
 
 
 class SoulParseError(ValueError):
-    pass
+    def __init__(self, message: str, *, stage: str = "parse") -> None:
+        super().__init__(message)
+        self.stage = stage
 
 
 class SchemeParseError(ValueError):
@@ -171,40 +173,66 @@ class SoulDetailParser:
         set_name_override: str = "",
     ) -> Soul:
         all_boxes = list(boxes)
+        usable_boxes = [box for box in all_boxes if box.confidence >= 0.65]
         anchor = next(
             (
                 box
-                for box in all_boxes
-                if box.confidence >= 0.92
-                and any(name in _normalize_text(box.text) for name in _SOUL_DETAIL_ANCHORS)
+                for box in usable_boxes
+                if any(
+                    name in _normalize_text(box.text)
+                    for name in _SOUL_DETAIL_ANCHORS
+                )
             ),
             None,
         )
-        if anchor is None:
-            raise SoulParseError("当前画面不像御魂详情页，请手动打开详情后重试")
 
-        anchor_x = anchor.center[0]
-        panel_half_width = max(420, (anchor.bounds[2] - anchor.bounds[0]) * 2)
+        set_name = set_name_override.strip()
+        set_box = None
+        if not set_name:
+            for box in usable_boxes:
+                text = _normalize_text(box.text)
+                match = next((name for name in KNOWN_SOUL_SETS if name in text), None)
+                if match:
+                    set_name = match
+                    set_box = box
+                    break
+
+        level_box = next(
+            (
+                box
+                for box in usable_boxes
+                if re.fullmatch(
+                    r"(?:强化)?\s*\+\s*([0-9]|1[0-5])",
+                    _normalize_text(box.text),
+                )
+            ),
+            None,
+        )
+        panel_seed = anchor or set_box or (level_box if set_name_override.strip() else None)
+        if panel_seed is None:
+            raise SoulParseError(
+                "当前画面不像御魂详情页，请手动打开详情后重试",
+                stage="page",
+            )
+
+        anchor_x = panel_seed.center[0]
+        panel_half_width = max(
+            420, (panel_seed.bounds[2] - panel_seed.bounds[0]) * 2
+        )
         ordered = sorted(
             (
                 box
-                for box in all_boxes
+                for box in usable_boxes
                 if abs(box.center[0] - anchor_x) <= panel_half_width
-                and box.center[1] >= anchor.bounds[1] - 12
+                and box.center[1] >= panel_seed.bounds[1] - 12
             ),
             key=lambda box: (box.bounds[1], box.bounds[0]),
         )
         texts = [_normalize_text(box.text) for box in ordered]
-        used_confidences: list[float] = [anchor.confidence]
+        used_confidences: list[float] = [anchor.confidence] if anchor else []
 
-        set_name = set_name_override.strip()
-        if not set_name:
-            for box, text in zip(ordered, texts, strict=True):
-                match = next((name for name in KNOWN_SOUL_SETS if name in text), None)
-                if match:
-                    set_name = match
-                    used_confidences.append(box.confidence)
-                    break
+        if set_box is not None:
+            used_confidences.append(set_box.confidence)
 
         level = None
         level_bottom = None
@@ -225,6 +253,14 @@ class SoulDetailParser:
                 stats.append(parsed)
                 used_confidences.append(box.confidence)
 
+        if anchor is None and (
+            not set_name or level is None or len(stats) < 2
+        ):
+            raise SoulParseError(
+                "当前画面不像御魂详情页：没有识别到稳定的套装、等级和属性区域",
+                stage="page",
+            )
+
         missing: list[str] = []
         if not set_name:
             missing.append("套装名")
@@ -233,7 +269,17 @@ class SoulDetailParser:
         if not stats:
             missing.append("主属性")
         if missing:
-            raise SoulParseError("无法识别：" + "、".join(missing))
+            stage = (
+                "set"
+                if "套装名" in missing
+                else "level"
+                if "等级" in missing
+                else "stats"
+            )
+            raise SoulParseError(
+                "无法识别：" + "、".join(missing),
+                stage=stage,
+            )
 
         equipped_to = None
         locked = False

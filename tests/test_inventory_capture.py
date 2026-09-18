@@ -68,6 +68,22 @@ class SoulDetailParserTests(unittest.TestCase):
             {Stat.DEFENSE_PCT: 3.0, Stat.ATTACK: 27.0}, soul.substats
         )
 
+    def test_parses_detail_panel_without_a_title_anchor(self):
+        boxes = [
+            box("招财猫", 0.97, 80),
+            box("+15", 0.91, 130),
+            box("速度 57", 0.89, 210),
+            box("暴击 +6%", 0.87, 280),
+        ]
+
+        soul = self.parser.parse(boxes, slot=2, rarity=6)
+
+        self.assertEqual("招财猫", soul.set_name)
+        self.assertEqual(15, soul.level)
+        self.assertEqual(Stat.SPEED, soul.main_stat)
+        self.assertEqual({Stat.CRIT_RATE: 6.0}, soul.substats)
+        self.assertEqual(0.87, soul.confidence)
+
     def test_override_supplies_unrecognized_set_name_and_id_is_stable(self):
         boxes = [
             box("御魂详情", 0.99, 35),

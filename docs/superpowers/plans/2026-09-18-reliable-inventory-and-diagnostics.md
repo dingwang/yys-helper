@@ -237,6 +237,6 @@ Run: `python -m pip check`
 
 Run: `git diff --check`
 
-- [ ] **Step 3: Commit release metadata and push `main` after the user-requested direct-delivery policy**
+- [x] **Step 3: Commit release metadata and push `main` after the user-requested direct-delivery policy**
 
 Commit: `release: deliver diagnosable real inventory workflow`

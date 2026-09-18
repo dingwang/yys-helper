@@ -135,6 +135,20 @@ class SoulDetailParserTests(unittest.TestCase):
         self.assertEqual(Stat.SPEED, soul.main_stat)
         self.assertEqual(24.0, soul.main_value)
 
+    def test_ignores_set_name_outside_the_anchored_detail_panel(self):
+        boxes = [
+            OcrBox("破势", 0.99, (80, 80, 260, 110)),
+            box("御魂详情", 0.99, 35),
+            box("招财猫", 0.99, 80),
+            box("+6", 0.99, 130),
+            box("速度 24", 0.99, 210),
+            box("暴击 +6%", 0.99, 280),
+        ]
+
+        soul = self.parser.parse(boxes, slot=2, rarity=6)
+
+        self.assertEqual("招财猫", soul.set_name)
+
 
 class SchemeRequirementParserTests(unittest.TestCase):
     def test_parses_sets_slot_main_stats_and_minimums(self):

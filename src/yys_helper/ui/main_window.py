@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QIcon, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QThread, QUrl, Qt, Signal
+from PySide6.QtGui import (
+    QDesktopServices,
+    QIcon,
+    QImage,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -28,7 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yys_helper.application.runtime import OcrMumuRuntime
+from yys_helper.application.runtime import CaptureError, OcrMumuRuntime
 from yys_helper.application.inventory_capture import (
     SchemeParseError,
     SchemeRequirementParser,
@@ -38,7 +46,7 @@ from yys_helper.application.inventory_capture import (
 from yys_helper.application.inventory_import import (
     ImportPreview,
     InventoryImportError,
-    parse_inventory_json,
+    load_inventory_file,
 )
 from yys_helper.application.schemes import (
     InvalidSchemeCode,
@@ -269,6 +277,7 @@ class InventoryPage(QWidget):
     delete_requested = Signal(str)
     import_requested = Signal(object)
     diagnostic_requested = Signal()
+    open_diagnostics_requested = Signal()
 
     def __init__(self, demo: DemoState, *, demo_mode: bool) -> None:
         super().__init__()
@@ -328,6 +337,11 @@ class InventoryPage(QWidget):
         self.save_diagnostic = QPushButton("保存诊断采集")
         self.save_diagnostic.clicked.connect(self.diagnostic_requested.emit)
         record_controls.addWidget(self.save_diagnostic)
+        self.open_diagnostics = QPushButton("打开诊断目录")
+        self.open_diagnostics.clicked.connect(
+            self.open_diagnostics_requested.emit
+        )
+        record_controls.addWidget(self.open_diagnostics)
         self.capture_update = QPushButton("更新选中")
         self.capture_update.clicked.connect(self._emit_update)
         record_controls.addWidget(self.capture_update)
@@ -726,6 +740,9 @@ class MainWindow(QMainWindow):
         self.inventory_page.diagnostic_requested.connect(
             self.save_capture_diagnostic
         )
+        self.inventory_page.open_diagnostics_requested.connect(
+            self.open_diagnostics_directory
+        )
         self.dailies_page.start_requested.connect(self.start_task)
         if demo_mode:
             self.add_log("助手已启动；当前为演示库存，不会向 MuMu 发送输入。")
@@ -927,7 +944,21 @@ class MainWindow(QMainWindow):
 
     def _task_failed(self, message: str) -> None:
         self._set_task_active(False)
-        self.add_log(f"任务异常：{message}")
+        evidence_note = ""
+        if (
+            self.runtime is not None
+            and getattr(self.runtime, "last_capture_error", None)
+            and getattr(self.runtime, "last_capture_png", None) is not None
+        ):
+            evidence_path = self._write_capture_evidence(
+                "automation-error",
+                self.runtime.last_capture_png,
+                tuple(self.runtime.last_boxes),
+                error=self.runtime.last_capture_error,
+            )
+            if evidence_path is not None:
+                evidence_note = f"；诊断：{evidence_path}"
+        self.add_log(f"任务异常：{message}{evidence_note}")
 
     def refresh_state(self, state: DemoState) -> None:
         self.demo = state
@@ -1038,6 +1069,18 @@ class MainWindow(QMainWindow):
                 f"{soul.set_name} {soul.slot}号位 +{soul.level}，"
                 f"OCR 置信度 {soul.confidence:.1%}{evidence_note}。"
             )
+        except CaptureError as exc:
+            QApplication.restoreOverrideCursor()
+            cursor_active = False
+            evidence_path = self._write_capture_evidence(
+                "soul-detail",
+                exc.png,
+                exc.boxes,
+                error=f"{exc.stage}: {exc}",
+            )
+            location = f"；诊断：{evidence_path}" if evidence_path else ""
+            QMessageBox.warning(self, "采集失败", f"{exc}{location}")
+            self.add_log(f"只读采集异常：{exc}{location}")
         except SoulParseError as exc:
             QApplication.restoreOverrideCursor()
             cursor_active = False
@@ -1106,15 +1149,38 @@ class MainWindow(QMainWindow):
                 raise OSError("诊断目录不可写")
             self.add_log(f"已保存只读诊断采集：{path}")
             QMessageBox.information(self, "诊断采集已保存", str(path))
+        except CaptureError as exc:
+            path = self._write_capture_evidence(
+                "manual-diagnostic",
+                exc.png,
+                exc.boxes,
+                error=f"{exc.stage}: {exc}",
+            )
+            location = f"；截图已保存：{path}" if path else ""
+            QMessageBox.warning(self, "诊断采集失败", f"{exc}{location}")
+            self.add_log(f"诊断采集失败：{exc}{location}")
         except Exception as exc:
             QMessageBox.warning(self, "诊断采集失败", str(exc))
             self.add_log(f"诊断采集失败：{exc}")
         finally:
             QApplication.restoreOverrideCursor()
 
+    def open_diagnostics_directory(self) -> None:
+        try:
+            self.evidence_writer.root.mkdir(parents=True, exist_ok=True)
+            opened = QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(self.evidence_writer.root.resolve()))
+            )
+            if not opened:
+                raise OSError("系统没有可用的文件管理器")
+        except OSError as exc:
+            QMessageBox.warning(self, "无法打开诊断目录", str(exc))
+            self.add_log(f"无法打开诊断目录：{exc}")
+
     def _confirm_inventory_import(self, preview: ImportPreview) -> bool:
         locked = sum(soul.locked for soul in preview.souls)
         discarded = sum(soul.marked_discard for soul in preview.souls)
+        low_confidence = sum(soul.confidence < 0.92 for soul in preview.souls)
         warnings = "\n".join(preview.warnings[:3])
         warning_text = (
             f"\n\n已跳过 {len(preview.warnings)} 条：\n{warnings}"
@@ -1128,6 +1194,7 @@ class MainWindow(QMainWindow):
             f"有效御魂：{len(preview.souls)} 枚\n"
             f"已锁定：{locked} 枚\n"
             f"已标记弃置：{discarded} 枚"
+            f"\n待复核（置信度低于 92%）：{low_confidence} 枚"
             f"{warning_text}\n\n"
             "这会替换助手本地库存，不会修改游戏。是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1139,7 +1206,7 @@ class MainWindow(QMainWindow):
         if self.demo_mode or self.repository is None or self._task_running():
             return
         try:
-            preview = parse_inventory_json(Path(path).read_bytes())
+            preview = load_inventory_file(Path(path))
             if not self._confirm_inventory_import(preview):
                 self.add_log("已取消导入御魂库存。")
                 return
@@ -1158,7 +1225,7 @@ class MainWindow(QMainWindow):
                 f"已从 {Path(path).name} 导入 {len(preview.souls)} 枚真实御魂"
                 f"（{preview.format_name}）{warning_note}。"
             )
-        except (OSError, InventoryImportError) as exc:
+        except (OSError, sqlite3.DatabaseError, InventoryImportError) as exc:
             QMessageBox.warning(self, "库存导入失败", str(exc))
             self.add_log(f"库存导入失败：{exc}")
 

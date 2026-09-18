@@ -4,8 +4,11 @@ import json
 import re
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
+
+from PIL import Image
 
 from yys_helper.infrastructure.vision import OcrBox
 
@@ -40,10 +43,21 @@ class CaptureEvidenceWriter:
         screen_tmp.write_bytes(png)
         screen_tmp.replace(folder / "screen.png")
 
+        resolved_metadata = dict(metadata)
+        try:
+            with Image.open(BytesIO(png)) as image:
+                width, height = image.size
+            resolved_metadata["resolution"] = {
+                "width": width,
+                "height": height,
+            }
+        except Exception:
+            resolved_metadata["resolution"] = None
+
         payload = {
             "purpose": safe_purpose,
             "captured_at": captured_at.isoformat(),
-            "metadata": dict(metadata),
+            "metadata": resolved_metadata,
             "error": error,
             "boxes": [
                 {

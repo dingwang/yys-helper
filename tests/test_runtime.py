@@ -3,7 +3,12 @@ from io import BytesIO
 
 from PIL import Image
 
-from yys_helper.application.runtime import OcrMumuRuntime, classify_scene, resolve_action_text
+from yys_helper.application.runtime import (
+    CaptureError,
+    OcrMumuRuntime,
+    classify_scene,
+    resolve_action_text,
+)
 from yys_helper.infrastructure.vision import VisionService
 from yys_helper.infrastructure.vision import OcrBox
 
@@ -119,6 +124,50 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(stream.getvalue(), runtime.last_capture_png)
         self.assertEqual("招财猫", boxes[0].text)
         self.assertEqual("探索地图", runtime.last_boxes[0].text)
+
+    def test_capture_error_retains_raw_png_when_ocr_fails(self):
+        stream = BytesIO()
+        Image.new("RGB", (100, 80), "white").save(stream, format="PNG")
+
+        class FakeAdb:
+            @staticmethod
+            def screenshot():
+                return stream.getvalue()
+
+        class FailingOcr:
+            @staticmethod
+            def read(_image):
+                raise RuntimeError("OCR unavailable")
+
+        runtime = OcrMumuRuntime(FakeAdb(), VisionService(FailingOcr()))
+
+        with self.assertRaises(CaptureError) as captured:
+            runtime.capture_evidence()
+
+        self.assertEqual(stream.getvalue(), captured.exception.png)
+        self.assertEqual("ocr", captured.exception.stage)
+
+    def test_observe_retains_failed_capture_for_automation_diagnostics(self):
+        stream = BytesIO()
+        Image.new("RGB", (100, 80), "white").save(stream, format="PNG")
+
+        class FakeAdb:
+            @staticmethod
+            def screenshot():
+                return stream.getvalue()
+
+        class FailingOcr:
+            @staticmethod
+            def read(_image):
+                raise RuntimeError("OCR unavailable")
+
+        runtime = OcrMumuRuntime(FakeAdb(), VisionService(FailingOcr()))
+
+        with self.assertRaises(CaptureError):
+            runtime.observe()
+
+        self.assertEqual(stream.getvalue(), runtime.last_capture_png)
+        self.assertIn("OCR unavailable", runtime.last_capture_error)
 
 
 if __name__ == "__main__":

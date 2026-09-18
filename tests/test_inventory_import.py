@@ -3,6 +3,7 @@ import unittest
 
 from yys_helper.application.inventory_import import (
     InventoryImportError,
+    load_inventory_file,
     parse_inventory_json,
 )
 from yys_helper.domain.models import Stat
@@ -42,6 +43,30 @@ class InventoryImportTests(unittest.TestCase):
         self.assertEqual({Stat.CRIT_RATE: 6.0}, soul.substats)
         self.assertTrue(soul.locked)
 
+    def test_fluxxu_boss_inherent_stat_is_added_to_matching_substat(self):
+        payload = {
+            "data": {
+                "hero_equips": [
+                    {
+                        "id": "boss-fluxxu",
+                        "suit_id": 300052,
+                        "pos": 0,
+                        "quality": 6,
+                        "level": 15,
+                        "base_attr": {"type": "Attack", "value": 486},
+                        "attrs": [{"type": "CritRate", "value": 0.06}],
+                        "single_attrs": [
+                            {"type": "CritRate", "value": 0.08}
+                        ],
+                    }
+                ]
+            }
+        }
+
+        soul = parse_inventory_json(json.dumps(payload).encode()).souls[0]
+
+        self.assertEqual({Stat.CRIT_RATE: 14.0}, soul.substats)
+
     def test_imports_new_client_export_and_marks_equipped(self):
         payload = {
             "ocr_info": {"version": 4.2},
@@ -74,6 +99,46 @@ class InventoryImportTests(unittest.TestCase):
         self.assertEqual("已装备", soul.equipped_to)
         self.assertTrue(soul.marked_discard)
 
+    def test_new_client_boss_inherent_stat_is_added_to_matching_substat(self):
+        payload = {
+            "equip_data": [
+                {
+                    "id": "boss-new",
+                    "suit_id": 300054,
+                    "pos": 6,
+                    "quality": 6,
+                    "level": 15,
+                    "base_attr": {"CritRate": 0.55},
+                    "rand_attr": {"EffectResistRate": 0.04},
+                    "single_attr": 6,
+                }
+            ]
+        }
+
+        soul = parse_inventory_json(json.dumps(payload).encode()).souls[0]
+
+        self.assertEqual({Stat.EFFECT_RESIST: 12.0}, soul.substats)
+
+    def test_imports_modern_soul_set_ids(self):
+        payload = {
+            "equip_data": [
+                {
+                    "id": "modern",
+                    "suit_id": 300090,
+                    "pos": 2,
+                    "quality": 6,
+                    "level": 0,
+                    "base_attr": {"Speed": 12},
+                    "rand_attr": {},
+                    "single_attr": 0,
+                }
+            ]
+        }
+
+        soul = parse_inventory_json(json.dumps(payload).encode()).souls[0]
+
+        self.assertEqual("钓瓶火", soul.set_name)
+
     def test_imports_native_inventory_format(self):
         payload = {
             "format": "yys-helper.inventory.v1",
@@ -98,7 +163,7 @@ class InventoryImportTests(unittest.TestCase):
         self.assertEqual("native-native-1", preview.souls[0].id)
         self.assertEqual(Stat.CRIT_RATE, preview.souls[0].main_stat)
 
-    def test_skips_bad_records_with_an_indexed_warning(self):
+    def test_rejects_partial_import_when_any_record_is_invalid(self):
         payload = {
             "data": {
                 "hero_equips": [
@@ -119,10 +184,44 @@ class InventoryImportTests(unittest.TestCase):
             }
         }
 
-        preview = parse_inventory_json(json.dumps(payload).encode("utf-8"))
+        with self.assertRaisesRegex(
+            InventoryImportError, "第 1 条.*原库存未更改"
+        ):
+            parse_inventory_json(json.dumps(payload).encode("utf-8"))
 
-        self.assertEqual(1, len(preview.souls))
-        self.assertIn("第 1 条", preview.warnings[0])
+    def test_rejects_duplicate_source_ids_before_database_write(self):
+        soul = {
+            "set_name": "火灵",
+            "slot": 6,
+            "rarity": 6,
+            "level": 0,
+            "main_stat": "crit_rate",
+            "main_value": 10,
+            "substats": {},
+        }
+        payload = {
+            "format": "yys-helper.inventory.v1",
+            "souls": [dict(soul, id="same"), dict(soul, id="same")],
+        }
+
+        with self.assertRaisesRegex(InventoryImportError, "重复.*原库存未更改"):
+            parse_inventory_json(json.dumps(payload).encode())
+
+    def test_checks_file_size_before_reading_payload(self):
+        class OversizedPath:
+            class StatResult:
+                st_size = 64 * 1024 * 1024 + 1
+
+            @staticmethod
+            def stat():
+                return OversizedPath.StatResult()
+
+            @staticmethod
+            def read_bytes():
+                raise AssertionError("oversized file must not be read")
+
+        with self.assertRaisesRegex(InventoryImportError, "64 MB"):
+            load_inventory_file(OversizedPath())
 
     def test_rejects_unknown_or_empty_json(self):
         with self.assertRaisesRegex(InventoryImportError, "不支持"):

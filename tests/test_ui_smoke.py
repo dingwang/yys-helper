@@ -10,6 +10,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from yys_helper.application.inventory_capture import SchemeParseError
+from yys_helper.application.inventory_import import ImportPreview
+from yys_helper.application.runtime import CaptureError
 from yys_helper.demo import create_demo_state, create_state
 from yys_helper.domain.models import BuildRequirement, Soul, Stat, StopReason, TaskOutcome
 from yys_helper.infrastructure.repository import AppRepository
@@ -437,6 +439,72 @@ class UiSmokeTests(unittest.TestCase):
             window.close()
             repository.close()
 
+    def test_ocr_failure_after_screenshot_still_saves_raw_evidence(self):
+        class GameAdb:
+            serial = "emulator-5556"
+
+            @staticmethod
+            def current_package():
+                return "com.netease.onmyoji"
+
+        class FailingRuntime:
+            adb = GameAdb()
+
+            @staticmethod
+            def capture_evidence():
+                raise CaptureError(
+                    "OCR failed", stage="ocr", png=b"raw-png"
+                )
+
+        class RecordingWriter:
+            def __init__(self):
+                self.calls = []
+
+            def write(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return Path("data/diagnostics/ocr-failure")
+
+        repository = AppRepository(":memory:")
+        window = MainWindow(
+            load_initial_state(repository, demo_mode=False),
+            demo_mode=False,
+            repository=repository,
+        )
+        window.runtime = FailingRuntime()
+        writer = RecordingWriter()
+        window.evidence_writer = writer
+        try:
+            with patch("yys_helper.ui.main_window.QMessageBox.warning"):
+                window.capture_current_soul("", 2, 6)
+
+            self.assertEqual(b"raw-png", writer.calls[0][0][1])
+            self.assertIn("ocr: OCR failed", writer.calls[0][1]["error"])
+        finally:
+            window.close()
+            repository.close()
+
+    def test_import_preview_reports_low_confidence_count(self):
+        soul = Soul(
+            id="review-import",
+            set_name="招财猫",
+            slot=2,
+            rarity=6,
+            level=0,
+            main_stat=Stat.SPEED,
+            main_value=12,
+            substats={},
+            confidence=0.80,
+        )
+        preview = ImportPreview("yys-helper", (soul,))
+
+        with patch(
+            "yys_helper.ui.main_window.QMessageBox.question",
+            return_value=QMessageBox.StandardButton.No,
+        ) as question:
+            self.window._confirm_inventory_import(preview)
+
+        self.assertIn("待复核（置信度低于 92%）：1 枚", question.call_args.args[2])
+
     def test_unknown_task_stop_saves_last_runtime_evidence(self):
         class GameAdb:
             serial = "emulator-5556"
@@ -475,6 +543,43 @@ class UiSmokeTests(unittest.TestCase):
 
             self.assertEqual("automation-unknown", writer.calls[0][0][0])
             self.assertIn("data\\diagnostics\\unknown", window.log.toPlainText())
+        finally:
+            window.close()
+            repository.close()
+
+    def test_automation_ocr_failure_saves_last_failed_capture(self):
+        class GameAdb:
+            serial = "emulator-5556"
+
+        class RuntimeWithFailureEvidence:
+            adb = GameAdb()
+            last_capture_png = b"raw-png"
+            last_boxes = []
+            last_capture_error = "OCR 识别失败：engine unavailable"
+
+        class RecordingWriter:
+            def __init__(self):
+                self.calls = []
+
+            def write(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return Path("data/diagnostics/automation-error")
+
+        repository = AppRepository(":memory:")
+        window = MainWindow(
+            load_initial_state(repository, demo_mode=False),
+            demo_mode=False,
+            repository=repository,
+        )
+        window.runtime = RuntimeWithFailureEvidence()
+        writer = RecordingWriter()
+        window.evidence_writer = writer
+        try:
+            window._task_failed("OCR 识别失败")
+
+            self.assertEqual("automation-error", writer.calls[0][0][0])
+            self.assertEqual(b"raw-png", writer.calls[0][0][1])
+            self.assertIn("automation-error", window.log.toPlainText())
         finally:
             window.close()
             repository.close()

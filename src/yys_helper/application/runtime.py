@@ -11,6 +11,21 @@ from yys_helper.infrastructure.adb import AdbClient
 from yys_helper.infrastructure.vision import OcrBox, VisionService
 
 
+class CaptureError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str,
+        png: bytes,
+        boxes: Iterable[OcrBox] = (),
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.png = png
+        self.boxes = tuple(boxes)
+
+
 _ACTION_TEXT: dict[str, tuple[str, ...]] = {
     "open_explore": ("探索",),
     "select_chapter_28_hard": ("第二十八章", "困难"),
@@ -71,12 +86,24 @@ class OcrMumuRuntime:
         self.last_image = None
         self.last_capture_png: bytes | None = None
         self.last_boxes: list[OcrBox] = []
+        self.last_capture_error: str | None = None
         self._io_lock = RLock()
 
     def _capture_with_png(self) -> tuple[bytes, Image.Image, list[OcrBox]]:
         png = self.adb.screenshot()
-        image = Image.open(BytesIO(png)).convert("RGB")
-        return png, image, list(self.vision.read(image))
+        try:
+            image = Image.open(BytesIO(png)).convert("RGB")
+        except Exception as exc:
+            raise CaptureError(
+                f"截图解码失败：{exc}", stage="decode", png=png
+            ) from exc
+        try:
+            boxes = list(self.vision.read(image))
+        except Exception as exc:
+            raise CaptureError(
+                f"OCR 识别失败：{exc}", stage="ocr", png=png
+            ) from exc
+        return png, image, boxes
 
     def _capture(self) -> tuple[Image.Image, list[OcrBox]]:
         _png, image, boxes = self._capture_with_png()
@@ -96,11 +123,19 @@ class OcrMumuRuntime:
 
     def observe(self) -> str | None:
         with self._io_lock:
-            (
-                self.last_capture_png,
-                self.last_image,
-                self.last_boxes,
-            ) = self._capture_with_png()
+            self.last_capture_error = None
+            try:
+                (
+                    self.last_capture_png,
+                    self.last_image,
+                    self.last_boxes,
+                ) = self._capture_with_png()
+            except CaptureError as exc:
+                self.last_capture_png = exc.png
+                self.last_image = None
+                self.last_boxes = list(exc.boxes)
+                self.last_capture_error = str(exc)
+                raise
             return classify_scene(self.last_boxes)
 
     def perform(self, action: str) -> bool:

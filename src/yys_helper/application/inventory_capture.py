@@ -66,6 +66,22 @@ KNOWN_SOUL_SETS = (
     "元兴寺",
     "钓瓶火",
     "叠叩",
+    "片叶之苇",
+    "尘冢",
+    "油赤子",
+    "夜啼石",
+    "夜送犬",
+    "雨降",
+    "贝吹坊",
+    "夜荒魂",
+    "无刀取",
+    "奉海图",
+    "八咫镜",
+    "天羽羽斩",
+    "预言星盘",
+    "月之石",
+    "纺缘锤",
+    "稻荷穗箭",
     "散件",
 )
 
@@ -187,28 +203,47 @@ class SoulDetailParser:
         )
 
         set_name = set_name_override.strip()
-        set_box = None
+        set_candidates: list[tuple[OcrBox, str]] = []
         if not set_name:
             for box in usable_boxes:
                 text = _normalize_text(box.text)
-                match = next((name for name in KNOWN_SOUL_SETS if name in text), None)
-                if match:
-                    set_name = match
-                    set_box = box
-                    break
-
-        level_box = next(
-            (
-                box
-                for box in usable_boxes
-                if re.fullmatch(
-                    r"(?:强化)?\s*\+\s*([0-9]|1[0-5])",
-                    _normalize_text(box.text),
+                match = next(
+                    (name for name in KNOWN_SOUL_SETS if name in text), None
                 )
-            ),
-            None,
+                if match:
+                    set_candidates.append((box, match))
+
+        level_candidates = [
+            box
+            for box in usable_boxes
+            if re.fullmatch(
+                r"(?:强化)?\s*\+\s*([0-9]|1[0-5])",
+                _normalize_text(box.text),
+            )
+        ]
+        level_box = level_candidates[0] if level_candidates else None
+        title_free_set_box = None
+        if anchor is None and not set_name and set_candidates:
+            paired = [
+                (set_box, level_candidate)
+                for set_box, _match in set_candidates
+                for level_candidate in level_candidates
+                if level_candidate.center[1] >= set_box.center[1]
+                and abs(level_candidate.center[0] - set_box.center[0]) <= 420
+            ]
+            if paired:
+                title_free_set_box, level_box = min(
+                    paired,
+                    key=lambda pair: (
+                        pair[1].center[1] - pair[0].center[1],
+                        abs(pair[1].center[0] - pair[0].center[0]),
+                    ),
+                )
+        panel_seed = (
+            anchor
+            or title_free_set_box
+            or (level_box if set_name_override.strip() else None)
         )
-        panel_seed = anchor or set_box or (level_box if set_name_override.strip() else None)
         if panel_seed is None:
             raise SoulParseError(
                 "当前画面不像御魂详情页，请手动打开详情后重试",
@@ -231,8 +266,18 @@ class SoulDetailParser:
         texts = [_normalize_text(box.text) for box in ordered]
         used_confidences: list[float] = [anchor.confidence] if anchor else []
 
-        if set_box is not None:
-            used_confidences.append(set_box.confidence)
+        if not set_name:
+            set_box = None
+            for box, text in zip(ordered, texts, strict=True):
+                match = next(
+                    (name for name in KNOWN_SOUL_SETS if name in text), None
+                )
+                if match:
+                    set_name = match
+                    set_box = box
+                    break
+            if set_box is not None:
+                used_confidences.append(set_box.confidence)
 
         level = None
         level_bottom = None

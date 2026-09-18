@@ -33,7 +33,7 @@
 - Produces: `CaptureEvidenceWriter(root: Path).write(purpose: str, png: bytes, boxes: Iterable[OcrBox], metadata: Mapping[str, object], error: str | None = None) -> Path`
 - Produces: `OcrMumuRuntime.capture_evidence() -> tuple[bytes, tuple[OcrBox, ...]]`
 
-- [ ] **Step 1: Write failing evidence serialization tests**
+- [x] **Step 1: Write failing evidence serialization tests**
 
 ```python
 def test_writer_saves_png_and_machine_readable_ocr(self):
@@ -47,9 +47,9 @@ def test_writer_saves_png_and_machine_readable_ocr(self):
     self.assertEqual("missing level", payload["error"])
 ```
 
-- [ ] **Step 2: Run `python -m unittest tests.test_diagnostics -v` and verify failure because the module is absent**
+- [x] **Step 2: Run `python -m unittest tests.test_diagnostics -v` and verify failure because the module is absent**
 
-- [ ] **Step 3: Implement sanitized purpose names, UTC timestamp directories, atomic JSON creation, and runtime raw capture**
+- [x] **Step 3: Implement sanitized purpose names, UTC timestamp directories, atomic JSON creation, and runtime raw capture**
 
 ```python
 def capture_evidence(self) -> tuple[bytes, tuple[OcrBox, ...]]:
@@ -59,7 +59,7 @@ def capture_evidence(self) -> tuple[bytes, tuple[OcrBox, ...]]:
         return png, tuple(self.vision.read(image))
 ```
 
-- [ ] **Step 4: Re-run focused tests and commit**
+- [x] **Step 4: Re-run focused tests and commit**
 
 Run: `python -m unittest tests.test_diagnostics tests.test_runtime -v`
 
@@ -75,7 +75,7 @@ Commit: `feat: save local OCR evidence bundles`
 - Preserves: `SoulDetailParser.parse(boxes, *, slot, rarity, set_name_override="") -> Soul`
 - Produces: `SoulParseError.stage: str` with values `page`, `set`, `level`, or `stats`
 
-- [ ] **Step 1: Add a failing title-free detail test**
+- [x] **Step 1: Add a failing title-free detail test**
 
 ```python
 def test_parses_detail_panel_without_synthetic_title_anchor(self):
@@ -90,13 +90,13 @@ def test_parses_detail_panel_without_synthetic_title_anchor(self):
                      (soul.set_name, soul.level, soul.main_stat))
 ```
 
-- [ ] **Step 2: Run the test and verify `当前画面不像御魂详情页`**
+- [x] **Step 2: Run the test and verify `当前画面不像御魂详情页`**
 
-- [ ] **Step 3: Replace the mandatory title anchor with spatial evidence**
+- [x] **Step 3: Replace the mandatory title anchor with spatial evidence**
 
 Accept a panel when a known/overridden set name and a valid level exist within one horizontal cluster and at least one parsable stat occurs below the level. Use `0.65` only for structural candidates, preserve the minimum actual confidence on the resulting soul, and keep missing critical fields as hard errors.
 
-- [ ] **Step 4: Add negative tests for unrelated stat fragments and verify the parser suite**
+- [x] **Step 4: Add negative tests for unrelated stat fragments and verify the parser suite**
 
 Run: `python -m unittest tests.test_inventory_capture.SoulDetailParserTests -v`
 
@@ -116,7 +116,7 @@ Commit: `fix: recognize title-free soul detail panels`
 - Produces: `parse_inventory_json(payload: bytes) -> ImportPreview`
 - Produces: `AppRepository.replace_souls(souls: Iterable[Soul]) -> None`
 
-- [ ] **Step 1: Write failing native and Fluxxu-format parser tests**
+- [x] **Step 1: Write failing native and Fluxxu-format parser tests**
 
 ```python
 def test_imports_fluxxu_snapshot(self):
@@ -134,13 +134,13 @@ def test_imports_fluxxu_snapshot(self):
                       preview.souls[0].main_value))
 ```
 
-- [ ] **Step 2: Run focused tests and verify failure because the importer is absent**
+- [x] **Step 2: Run focused tests and verify failure because the importer is absent**
 
-- [ ] **Step 3: Implement strict format detection and field mapping**
+- [x] **Step 3: Implement strict format detection and field mapping**
 
 Support `yys-helper.inventory.v1`, Fluxxu `data.hero_equips`, and new-client `equip_data`. Map `Hp/Defense/Attack/HpRate/DefenseRate/AttackRate/Speed/CritRate/CritPower/EffectHitRate/EffectResistRate` to `Stat`; multiply rate values by 100; reject unknown suit IDs and malformed records with indexed messages. Use stable source IDs prefixed by format.
 
-- [ ] **Step 4: Implement transactional replacement and rollback test**
+- [x] **Step 4: Implement transactional replacement and rollback test**
 
 ```python
 def replace_souls(self, souls):
@@ -150,7 +150,7 @@ def replace_souls(self, souls):
             self.connection.execute(INSERT_SOUL_SQL, (soul.id, self._soul_payload(soul)))
 ```
 
-- [ ] **Step 5: Run importer and repository tests and commit**
+- [x] **Step 5: Run importer and repository tests and commit**
 
 Run: `python -m unittest tests.test_inventory_import tests.test_repository -v`
 
@@ -167,7 +167,7 @@ Commit: `feat: import complete soul inventory snapshots`
 - `MainWindow.import_inventory(path: Path) -> None` parses, confirms, transactionally replaces, and refreshes state.
 - `MainWindow.capture_current_soul(...)` writes an evidence bundle on success or failure.
 
-- [ ] **Step 1: Write failing UI tests for import refresh and failed-capture evidence**
+- [x] **Step 1: Write failing UI tests for import refresh and failed-capture evidence**
 
 ```python
 def test_inventory_import_replaces_local_inventory_after_confirmation(self):
@@ -177,15 +177,15 @@ def test_inventory_import_replaces_local_inventory_after_confirmation(self):
     self.assertIn("导入 1 枚", window.log.toPlainText())
 ```
 
-- [ ] **Step 2: Run focused UI tests and verify missing controls/handlers**
+- [x] **Step 2: Run focused UI tests and verify missing controls/handlers**
 
-- [ ] **Step 3: Add `导入库存 JSON` and `保存诊断采集` controls**
+- [x] **Step 3: Add `导入库存 JSON` and `保存诊断采集` controls**
 
 The import dialog accepts only `.json`. Preview shows format, total, locked, discarded, low-confidence and warning counts. Confirmation text states that the local snapshot will be replaced and the game will not be modified.
 
-- [ ] **Step 4: Route raw capture through `capture_evidence`, persist bundle, parse the same boxes, and include the folder in errors**
+- [x] **Step 4: Route raw capture through `capture_evidence`, persist bundle, parse the same boxes, and include the folder in errors**
 
-- [ ] **Step 5: Verify UI tests and commit**
+- [x] **Step 5: Verify UI tests and commit**
 
 Run: `python -m unittest tests.test_ui_smoke -v`
 
@@ -204,13 +204,13 @@ Commit: `feat: add inventory import and capture diagnostics UI`
 - Produces: `OcrMumuRuntime.last_capture_png: bytes | None`
 - `AutomationWorker` emits the final runtime evidence when stop reason is `UNRECOGNIZED_SCENE`.
 
-- [ ] **Step 1: Write a failing test proving three unknown scenes perform no input and expose the final capture**
+- [x] **Step 1: Write a failing test proving three unknown scenes perform no input and expose the final capture**
 
-- [ ] **Step 2: Keep the latest PNG and OCR boxes in runtime without altering actor state**
+- [x] **Step 2: Keep the latest PNG and OCR boxes in runtime without altering actor state**
 
-- [ ] **Step 3: On unknown-scene completion, save `automation-unknown` evidence and log its path**
+- [x] **Step 3: On unknown-scene completion, save `automation-unknown` evidence and log its path**
 
-- [ ] **Step 4: Run engine/runtime/UI suites and commit**
+- [x] **Step 4: Run engine/runtime/UI suites and commit**
 
 Run: `python -m unittest tests.test_engine tests.test_runtime tests.test_ui_smoke -v`
 
@@ -225,9 +225,9 @@ Commit: `feat: preserve unknown automation scene evidence`
 **Interfaces:**
 - Bumps package version from `0.2.0` to `0.3.0`.
 
-- [ ] **Step 1: Document the two inventory paths, diagnostic location, supported JSON formats, and safe next-run workflow**
+- [x] **Step 1: Document the two inventory paths, diagnostic location, supported JSON formats, and safe next-run workflow**
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 Run: `python -m unittest discover -s tests -v`
 

@@ -48,7 +48,7 @@ from yys_helper.application.schemes import (
 from yys_helper.automation.engine import AutomationEngine, CancellationToken
 from yys_helper.automation.workflows import chapter_28_workflow, soul_dungeon_workflow
 from yys_helper.demo import DemoState, create_state
-from yys_helper.domain.models import BuildRequirement, Stat, TaskLimits
+from yys_helper.domain.models import BuildRequirement, Stat, StopReason, TaskLimits
 from yys_helper.domain.safety import protection_reasons
 from yys_helper.domain.scoring import DEFAULT_PROFILES, score_soul
 from yys_helper.infrastructure.adb import AdbClient, AdbError, discover_adb
@@ -903,7 +903,27 @@ class MainWindow(QMainWindow):
 
     def _task_completed(self, result) -> None:
         self._set_task_active(False)
-        self.add_log(f"任务停止：{result.reason.value}，完成 {result.rounds} 轮，最终场景 {result.final_state}。")
+        evidence_note = ""
+        if (
+            result.reason == StopReason.UNRECOGNIZED_SCENE
+            and self.runtime is not None
+            and self.runtime.last_capture_png is not None
+        ):
+            evidence_path = self._write_capture_evidence(
+                "automation-unknown",
+                self.runtime.last_capture_png,
+                tuple(self.runtime.last_boxes),
+                error=(
+                    f"stop={result.reason.value}; state={result.final_state}; "
+                    f"rounds={result.rounds}"
+                ),
+            )
+            if evidence_path is not None:
+                evidence_note = f"；诊断：{evidence_path}"
+        self.add_log(
+            f"任务停止：{result.reason.value}，完成 {result.rounds} 轮，"
+            f"最终场景 {result.final_state}{evidence_note}。"
+        )
 
     def _task_failed(self, message: str) -> None:
         self._set_task_active(False)

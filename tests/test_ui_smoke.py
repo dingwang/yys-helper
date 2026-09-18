@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from yys_helper.application.inventory_capture import SchemeParseError
 from yys_helper.demo import create_demo_state, create_state
-from yys_helper.domain.models import BuildRequirement, Soul, Stat
+from yys_helper.domain.models import BuildRequirement, Soul, Stat, StopReason, TaskOutcome
 from yys_helper.infrastructure.repository import AppRepository
 from yys_helper.infrastructure.vision import OcrBox
 from yys_helper.ui.app import load_initial_state
@@ -433,6 +433,48 @@ class UiSmokeTests(unittest.TestCase):
             self.assertEqual(1, len(writer.calls))
             self.assertIn("data\\diagnostics\\failure", window.log.toPlainText())
             self.assertIn("error", writer.calls[0][1])
+        finally:
+            window.close()
+            repository.close()
+
+    def test_unknown_task_stop_saves_last_runtime_evidence(self):
+        class GameAdb:
+            serial = "emulator-5556"
+
+        class RuntimeWithEvidence:
+            adb = GameAdb()
+            last_capture_png = b"png"
+            last_boxes = [OcrBox("未知页面", 0.99, (10, 10, 100, 40))]
+
+        class RecordingWriter:
+            def __init__(self):
+                self.calls = []
+
+            def write(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return Path("data/diagnostics/unknown")
+
+        repository = AppRepository(":memory:")
+        window = MainWindow(
+            load_initial_state(repository, demo_mode=False),
+            demo_mode=False,
+            repository=repository,
+        )
+        window.runtime = RuntimeWithEvidence()
+        writer = RecordingWriter()
+        window.evidence_writer = writer
+        try:
+            window._task_completed(
+                TaskOutcome(
+                    StopReason.UNRECOGNIZED_SCENE,
+                    "starting",
+                    0,
+                    3.0,
+                )
+            )
+
+            self.assertEqual("automation-unknown", writer.calls[0][0][0])
+            self.assertIn("data\\diagnostics\\unknown", window.log.toPlainText())
         finally:
             window.close()
             repository.close()

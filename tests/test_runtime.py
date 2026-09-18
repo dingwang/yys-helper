@@ -116,6 +116,7 @@ class RuntimeTests(unittest.TestCase):
         png, boxes = runtime.capture_evidence()
 
         self.assertEqual(stream.getvalue(), png)
+        self.assertEqual(stream.getvalue(), runtime.last_capture_png)
         self.assertEqual("招财猫", boxes[0].text)
         self.assertEqual("探索地图", runtime.last_boxes[0].text)
 

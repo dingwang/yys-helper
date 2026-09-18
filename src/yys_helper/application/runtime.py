@@ -69,13 +69,18 @@ class OcrMumuRuntime:
         self.vision = vision
         self.sleeper = sleeper
         self.last_image = None
+        self.last_capture_png: bytes | None = None
         self.last_boxes: list[OcrBox] = []
         self._io_lock = RLock()
 
-    def _capture(self) -> tuple[Image.Image, list[OcrBox]]:
+    def _capture_with_png(self) -> tuple[bytes, Image.Image, list[OcrBox]]:
         png = self.adb.screenshot()
         image = Image.open(BytesIO(png)).convert("RGB")
-        return image, list(self.vision.read(image))
+        return png, image, list(self.vision.read(image))
+
+    def _capture(self) -> tuple[Image.Image, list[OcrBox]]:
+        _png, image, boxes = self._capture_with_png()
+        return image, boxes
 
     def capture_boxes(self) -> tuple[OcrBox, ...]:
         """Capture OCR for a read-only feature without changing actor state."""
@@ -86,13 +91,16 @@ class OcrMumuRuntime:
     def capture_evidence(self) -> tuple[bytes, tuple[OcrBox, ...]]:
         """Return the raw screenshot and OCR without changing actor state."""
         with self._io_lock:
-            png = self.adb.screenshot()
-            image = Image.open(BytesIO(png)).convert("RGB")
-            return png, tuple(self.vision.read(image))
+            png, _image, boxes = self._capture_with_png()
+            return png, tuple(boxes)
 
     def observe(self) -> str | None:
         with self._io_lock:
-            self.last_image, self.last_boxes = self._capture()
+            (
+                self.last_capture_png,
+                self.last_image,
+                self.last_boxes,
+            ) = self._capture_with_png()
             return classify_scene(self.last_boxes)
 
     def perform(self, action: str) -> bool:

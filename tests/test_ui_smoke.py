@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -228,8 +229,8 @@ class UiSmokeTests(unittest.TestCase):
             adb = GameAdb()
 
             @staticmethod
-            def capture_boxes():
-                return (
+            def capture_evidence():
+                return b"png", (
                     OcrBox("御魂详情", 0.99, (900, 35, 1200, 65)),
                     OcrBox("招财猫", 0.99, (900, 80, 1200, 110)),
                     OcrBox("+6", 0.98, (900, 130, 1200, 160)),
@@ -263,8 +264,8 @@ class UiSmokeTests(unittest.TestCase):
             adb = GameAdb()
 
             @staticmethod
-            def capture_boxes():
-                return (
+            def capture_evidence():
+                return b"png", (
                     OcrBox("御魂详情", 0.99, (900, 35, 1200, 65)),
                     OcrBox("招财猫", 0.99, (900, 80, 1200, 110)),
                     OcrBox("+6", 0.98, (900, 130, 1200, 160)),
@@ -305,8 +306,8 @@ class UiSmokeTests(unittest.TestCase):
             adb = GameAdb()
 
             @staticmethod
-            def capture_boxes():
-                return (OcrBox("御魂详情", 0.99, (10, 10, 100, 40)),)
+            def capture_evidence():
+                return b"png", (OcrBox("御魂详情", 0.99, (10, 10, 100, 40)),)
 
         repository = AppRepository(":memory:")
         window = MainWindow(
@@ -336,7 +337,7 @@ class UiSmokeTests(unittest.TestCase):
             adb = LauncherAdb()
 
             @staticmethod
-            def capture_boxes():
+            def capture_evidence():
                 raise AssertionError("must not capture a non-game foreground")
 
         repository = AppRepository(":memory:")
@@ -351,6 +352,87 @@ class UiSmokeTests(unittest.TestCase):
                 window.capture_current_soul("", 2, 6)
 
             self.assertEqual([], repository.list_souls())
+        finally:
+            window.close()
+            repository.close()
+
+    def test_inventory_import_replaces_local_inventory_after_confirmation(self):
+        repository = AppRepository(":memory:")
+        window = MainWindow(
+            load_initial_state(repository, demo_mode=False),
+            demo_mode=False,
+            repository=repository,
+        )
+        payload = {
+            "format": "yys-helper.inventory.v1",
+            "souls": [
+                {
+                    "id": "imported-1",
+                    "set_name": "火灵",
+                    "slot": 6,
+                    "rarity": 6,
+                    "level": 0,
+                    "main_stat": "crit_rate",
+                    "main_value": 10,
+                    "substats": {"speed": 3},
+                }
+            ],
+        }
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "inventory.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                with patch.object(
+                    window, "_confirm_inventory_import", return_value=True
+                ):
+                    window.import_inventory(path)
+
+            self.assertEqual(1, window.inventory_page.table.rowCount())
+            self.assertEqual("火灵", repository.list_souls()[0].set_name)
+            self.assertIn("导入 1 枚", window.log.toPlainText())
+        finally:
+            window.close()
+            repository.close()
+
+    def test_failed_capture_saves_evidence_and_logs_its_folder(self):
+        class GameAdb:
+            serial = "emulator-5556"
+
+            @staticmethod
+            def current_package():
+                return "com.netease.onmyoji"
+
+        class EmptyRuntime:
+            adb = GameAdb()
+
+            @staticmethod
+            def capture_evidence():
+                return b"png", (OcrBox("普通页面", 0.99, (10, 10, 100, 40)),)
+
+        class RecordingWriter:
+            def __init__(self):
+                self.calls = []
+
+            def write(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return Path("data/diagnostics/failure")
+
+        repository = AppRepository(":memory:")
+        window = MainWindow(
+            load_initial_state(repository, demo_mode=False),
+            demo_mode=False,
+            repository=repository,
+        )
+        window.runtime = EmptyRuntime()
+        writer = RecordingWriter()
+        window.evidence_writer = writer
+        try:
+            with patch("yys_helper.ui.main_window.QMessageBox.warning"):
+                window.capture_current_soul("", 2, 6)
+
+            self.assertEqual(1, len(writer.calls))
+            self.assertIn("data\\diagnostics\\failure", window.log.toPlainText())
+            self.assertIn("error", writer.calls[0][1])
         finally:
             window.close()
             repository.close()

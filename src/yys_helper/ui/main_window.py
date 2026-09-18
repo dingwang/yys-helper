@@ -35,6 +35,11 @@ from yys_helper.application.inventory_capture import (
     SoulDetailParser,
     SoulParseError,
 )
+from yys_helper.application.inventory_import import (
+    ImportPreview,
+    InventoryImportError,
+    parse_inventory_json,
+)
 from yys_helper.application.schemes import (
     InvalidSchemeCode,
     decode_qr_scheme,
@@ -47,8 +52,9 @@ from yys_helper.domain.models import BuildRequirement, Stat, TaskLimits
 from yys_helper.domain.safety import protection_reasons
 from yys_helper.domain.scoring import DEFAULT_PROFILES, score_soul
 from yys_helper.infrastructure.adb import AdbClient, AdbError, discover_adb
+from yys_helper.infrastructure.diagnostics import CaptureEvidenceWriter
 from yys_helper.infrastructure.repository import AppRepository
-from yys_helper.infrastructure.vision import RapidOcrEngine, VisionService
+from yys_helper.infrastructure.vision import OcrBox, RapidOcrEngine, VisionService
 
 
 STAT_LABELS = {
@@ -261,6 +267,8 @@ class SchemePage(QWidget):
 class InventoryPage(QWidget):
     capture_requested = Signal(str, int, int, str)
     delete_requested = Signal(str)
+    import_requested = Signal(object)
+    diagnostic_requested = Signal()
 
     def __init__(self, demo: DemoState, *, demo_mode: bool) -> None:
         super().__init__()
@@ -314,6 +322,12 @@ class InventoryPage(QWidget):
         record_hint.setObjectName("muted")
         record_controls.addWidget(record_hint)
         record_controls.addStretch()
+        self.import_json = QPushButton("导入库存 JSON")
+        self.import_json.clicked.connect(self._choose_inventory)
+        record_controls.addWidget(self.import_json)
+        self.save_diagnostic = QPushButton("保存诊断采集")
+        self.save_diagnostic.clicked.connect(self.diagnostic_requested.emit)
+        record_controls.addWidget(self.save_diagnostic)
         self.capture_update = QPushButton("更新选中")
         self.capture_update.clicked.connect(self._emit_update)
         record_controls.addWidget(self.capture_update)
@@ -395,6 +409,13 @@ class InventoryPage(QWidget):
         if soul_id:
             self.delete_requested.emit(soul_id)
 
+    def _choose_inventory(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "选择御魂库存 JSON", "", "JSON (*.json)"
+        )
+        if filename:
+            self.import_requested.emit(Path(filename))
+
     def _update_record_buttons(self) -> None:
         soul_id = self.selected_soul_id()
         has_selection = bool(soul_id)
@@ -411,6 +432,8 @@ class InventoryPage(QWidget):
         self._live_enabled = enabled
         available = enabled and not self.demo_mode
         self.capture_new.setEnabled(available)
+        self.import_json.setEnabled(available)
+        self.save_diagnostic.setEnabled(available)
         self.set_override.setEnabled(available)
         self.slot.setEnabled(available)
         self.rarity.setEnabled(available)
@@ -580,6 +603,9 @@ class MainWindow(QMainWindow):
         self.current_requirement = demo.requirement
         self.demo_mode = demo_mode
         self.repository = repository
+        self.evidence_writer = CaptureEvidenceWriter(
+            Path.cwd() / "data" / "diagnostics"
+        )
         self.runtime: OcrMumuRuntime | None = None
         self.worker: TaskWorker | None = None
         self.cancel_token = CancellationToken()
@@ -696,6 +722,10 @@ class MainWindow(QMainWindow):
         self.scheme_page.read_game_requested.connect(self.read_current_scheme)
         self.inventory_page.capture_requested.connect(self.capture_current_soul)
         self.inventory_page.delete_requested.connect(self.delete_soul_record)
+        self.inventory_page.import_requested.connect(self.import_inventory)
+        self.inventory_page.diagnostic_requested.connect(
+            self.save_capture_diagnostic
+        )
         self.dailies_page.start_requested.connect(self.start_task)
         if demo_mode:
             self.add_log("助手已启动；当前为演示库存，不会向 MuMu 发送输入。")
@@ -959,9 +989,11 @@ class MainWindow(QMainWindow):
         if not self._require_game_foreground("读取御魂详情"):
             return
         cursor_active = True
+        png: bytes | None = None
+        boxes: tuple[OcrBox, ...] = ()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            boxes = self.runtime.capture_boxes()
+            png, boxes = self.runtime.capture_evidence()
             soul = SoulDetailParser().parse(
                 boxes,
                 slot=slot,
@@ -977,24 +1009,138 @@ class MainWindow(QMainWindow):
                 self.repository.list_souls(), self.current_requirement
             )
             self.refresh_state(state)
+            evidence_path = self._write_capture_evidence(
+                "soul-detail", png, boxes
+            )
+            evidence_note = f"；证据：{evidence_path}" if evidence_path else ""
             self.add_log(
                 f"只读{'更新' if record_id else '新增'}成功："
                 f"{soul.set_name} {soul.slot}号位 +{soul.level}，"
-                f"OCR 置信度 {soul.confidence:.1%}。"
+                f"OCR 置信度 {soul.confidence:.1%}{evidence_note}。"
             )
         except SoulParseError as exc:
             QApplication.restoreOverrideCursor()
             cursor_active = False
-            QMessageBox.warning(self, "无法识别御魂详情", str(exc))
-            self.add_log(f"只读采集失败：{exc}")
+            evidence_path = self._write_capture_evidence(
+                "soul-detail", png, boxes, error=f"{exc.stage}: {exc}"
+            )
+            location = f"；诊断：{evidence_path}" if evidence_path else ""
+            QMessageBox.warning(
+                self, "无法识别御魂详情", f"{exc}{location}"
+            )
+            self.add_log(f"只读采集失败：{exc}{location}")
         except Exception as exc:
             QApplication.restoreOverrideCursor()
             cursor_active = False
-            QMessageBox.warning(self, "采集失败", str(exc))
-            self.add_log(f"只读采集异常：{exc}")
+            evidence_path = self._write_capture_evidence(
+                "soul-detail", png, boxes, error=str(exc)
+            )
+            location = f"；诊断：{evidence_path}" if evidence_path else ""
+            QMessageBox.warning(self, "采集失败", f"{exc}{location}")
+            self.add_log(f"只读采集异常：{exc}{location}")
         finally:
             if cursor_active:
                 QApplication.restoreOverrideCursor()
+
+    def _write_capture_evidence(
+        self,
+        purpose: str,
+        png: bytes | None,
+        boxes: tuple[OcrBox, ...],
+        *,
+        error: str | None = None,
+    ) -> Path | None:
+        if png is None:
+            return None
+        try:
+            serial = (
+                getattr(self.runtime.adb, "serial", None)
+                if self.runtime is not None
+                else None
+            )
+            return self.evidence_writer.write(
+                purpose,
+                png,
+                boxes,
+                {"serial": serial or "unknown"},
+                error=error,
+            )
+        except OSError as exc:
+            self.add_log(f"诊断证据保存失败：{exc}")
+            return None
+
+    def save_capture_diagnostic(self) -> None:
+        if self.demo_mode:
+            return
+        if self.runtime is None:
+            QMessageBox.information(self, "尚未连接", "请先连接 MuMu，再保存诊断采集。")
+            return
+        if self._task_running():
+            QMessageBox.information(self, "任务运行中", "请先停止任务，再保存诊断采集。")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            png, boxes = self.runtime.capture_evidence()
+            path = self._write_capture_evidence("manual-diagnostic", png, boxes)
+            if path is None:
+                raise OSError("诊断目录不可写")
+            self.add_log(f"已保存只读诊断采集：{path}")
+            QMessageBox.information(self, "诊断采集已保存", str(path))
+        except Exception as exc:
+            QMessageBox.warning(self, "诊断采集失败", str(exc))
+            self.add_log(f"诊断采集失败：{exc}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _confirm_inventory_import(self, preview: ImportPreview) -> bool:
+        locked = sum(soul.locked for soul in preview.souls)
+        discarded = sum(soul.marked_discard for soul in preview.souls)
+        warnings = "\n".join(preview.warnings[:3])
+        warning_text = (
+            f"\n\n已跳过 {len(preview.warnings)} 条：\n{warnings}"
+            if preview.warnings
+            else ""
+        )
+        answer = QMessageBox.question(
+            self,
+            "确认导入库存",
+            f"格式：{preview.format_name}\n"
+            f"有效御魂：{len(preview.souls)} 枚\n"
+            f"已锁定：{locked} 枚\n"
+            f"已标记弃置：{discarded} 枚"
+            f"{warning_text}\n\n"
+            "这会替换助手本地库存，不会修改游戏。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def import_inventory(self, path: Path) -> None:
+        if self.demo_mode or self.repository is None or self._task_running():
+            return
+        try:
+            preview = parse_inventory_json(Path(path).read_bytes())
+            if not self._confirm_inventory_import(preview):
+                self.add_log("已取消导入御魂库存。")
+                return
+            self.repository.replace_souls(preview.souls)
+            self.refresh_state(
+                create_state(
+                    self.repository.list_souls(), self.current_requirement
+                )
+            )
+            warning_note = (
+                f"，跳过 {len(preview.warnings)} 条异常记录"
+                if preview.warnings
+                else ""
+            )
+            self.add_log(
+                f"已从 {Path(path).name} 导入 {len(preview.souls)} 枚真实御魂"
+                f"（{preview.format_name}）{warning_note}。"
+            )
+        except (OSError, InventoryImportError) as exc:
+            QMessageBox.warning(self, "库存导入失败", str(exc))
+            self.add_log(f"库存导入失败：{exc}")
 
     def delete_soul_record(self, soul_id: str) -> None:
         if self.demo_mode or self.repository is None or self._task_running():

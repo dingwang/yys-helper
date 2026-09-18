@@ -83,6 +83,13 @@ class OcrMumuRuntime:
             _image, boxes = self._capture()
             return tuple(boxes)
 
+    def capture_evidence(self) -> tuple[bytes, tuple[OcrBox, ...]]:
+        """Return the raw screenshot and OCR without changing actor state."""
+        with self._io_lock:
+            png = self.adb.screenshot()
+            image = Image.open(BytesIO(png)).convert("RGB")
+            return png, tuple(self.vision.read(image))
+
     def observe(self) -> str | None:
         with self._io_lock:
             self.last_image, self.last_boxes = self._capture()

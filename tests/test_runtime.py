@@ -87,6 +87,38 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual("御魂详情", captured[0].text)
         self.assertEqual("探索地图", runtime.last_boxes[0].text)
 
+    def test_capture_evidence_returns_png_without_replacing_observation(self):
+        stream = BytesIO()
+        Image.new("RGB", (100, 100), "white").save(stream, format="PNG")
+
+        class FakeAdb:
+            @staticmethod
+            def screenshot():
+                return stream.getvalue()
+
+        class SequencedOcr:
+            def __init__(self):
+                self.calls = 0
+
+            def read(self, _image):
+                self.calls += 1
+                return [
+                    OcrBox(
+                        "探索地图" if self.calls == 1 else "招财猫",
+                        0.99,
+                        (0, 0, 20, 20),
+                    )
+                ]
+
+        runtime = OcrMumuRuntime(FakeAdb(), VisionService(SequencedOcr()))
+        runtime.observe()
+
+        png, boxes = runtime.capture_evidence()
+
+        self.assertEqual(stream.getvalue(), png)
+        self.assertEqual("招财猫", boxes[0].text)
+        self.assertEqual("探索地图", runtime.last_boxes[0].text)
+
 
 if __name__ == "__main__":
     unittest.main()

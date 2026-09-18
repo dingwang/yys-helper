@@ -30,6 +30,7 @@ class Workflow:
     transitions: dict[str, Transition]
     terminal_scenes: frozenset[str] = frozenset()
     stop_scenes: dict[str, StopReason] = field(default_factory=dict)
+    track_battles: bool = False
 
     def next_state(self, state: str, action: str) -> str | None:
         transition = self.transitions.get(state)
@@ -48,6 +49,9 @@ class CancellationToken:
     def is_cancelled(self) -> bool:
         return self._event.is_set()
 
+    def wait(self, seconds: float) -> None:
+        self._event.wait(seconds)
+
 
 class AutomationEngine:
     def __init__(
@@ -57,11 +61,13 @@ class AutomationEngine:
         *,
         clock=time.monotonic,
         sleeper=time.sleep,
+        progress=None,
     ) -> None:
         self.observer = observer
         self.actor = actor
         self.clock = clock
         self.sleeper = sleeper
+        self.progress = progress or (lambda _scene, _rounds, _elapsed: None)
 
     def run(
         self,
@@ -75,6 +81,10 @@ class AutomationEngine:
         last_scene = "starting"
         unknown_count = 0
         expected_scenes: tuple[str, ...] | None = None
+        battle_open = False
+        scene_since = started
+        previous_scene = None
+        wait = token.wait if self.sleeper is time.sleep else self.sleeper
 
         while True:
             elapsed = self.clock() - started
@@ -90,6 +100,12 @@ class AutomationEngine:
                     StopReason.ADB_DISCONNECTED, last_scene, rounds, elapsed, str(exc)
                 )
 
+            elapsed = self.clock() - started
+            if token.is_cancelled():
+                return TaskOutcome(StopReason.CANCELLED, last_scene, rounds, elapsed)
+            if elapsed >= limits.max_duration_seconds:
+                return TaskOutcome(StopReason.MAX_DURATION, last_scene, rounds, elapsed)
+
             if scene in workflow.stop_scenes:
                 return TaskOutcome(workflow.stop_scenes[scene], scene or last_scene, rounds, elapsed)
 
@@ -102,11 +118,20 @@ class AutomationEngine:
                         rounds,
                         self.clock() - started,
                     )
+                wait(1.0)
                 continue
 
             last_scene = scene
             expected_scenes = None
             unknown_count = 0
+            if scene != previous_scene:
+                scene_since = self.clock()
+                previous_scene = scene
+            elif scene != 'battle' and self.clock() - scene_since > 30:
+                return TaskOutcome(StopReason.UNRECOGNIZED_SCENE, scene, rounds, elapsed, '页面超过 30 秒未变化')
+            if scene == 'battle':
+                battle_open = True
+            self.progress(scene, rounds, elapsed)
             if scene in workflow.terminal_scenes:
                 return TaskOutcome(
                     StopReason.COMPLETED, scene, rounds, self.clock() - started
@@ -118,7 +143,20 @@ class AutomationEngine:
                 expected_scenes = ("__no_valid_transition__",)
                 continue
 
-            if not self.actor.perform(transition.action):
+            if transition.round_completed and (not workflow.track_battles or battle_open):
+                rounds += 1
+                battle_open = False
+                self.progress(scene, rounds, elapsed)
+                if rounds >= limits.max_rounds:
+                    return TaskOutcome(StopReason.MAX_ROUNDS, scene, rounds, self.clock() - started)
+            # A completed last round must never press "challenge again".
+            if token.is_cancelled():
+                return TaskOutcome(StopReason.CANCELLED, scene, rounds, self.clock() - started)
+            try:
+                performed = self.actor.perform(transition.action)
+            except Exception as exc:
+                return TaskOutcome(StopReason.ACTION_FAILED, scene, rounds, self.clock() - started, str(exc))
+            if not performed:
                 return TaskOutcome(
                     StopReason.ACTION_FAILED,
                     scene,
@@ -127,11 +165,5 @@ class AutomationEngine:
                     transition.action,
                 )
             if transition.poll_delay_seconds > 0:
-                self.sleeper(transition.poll_delay_seconds)
+                wait(transition.poll_delay_seconds)
             expected_scenes = transition.expected_scenes
-            if transition.round_completed:
-                rounds += 1
-                if rounds >= limits.max_rounds:
-                    return TaskOutcome(
-                        StopReason.MAX_ROUNDS, scene, rounds, self.clock() - started
-                    )

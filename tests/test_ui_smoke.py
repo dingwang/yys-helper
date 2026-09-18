@@ -42,6 +42,14 @@ class UiSmokeTests(unittest.TestCase):
         self.window.stop_task()
         self.assertTrue(self.window.cancel_token.is_cancelled())
 
+    def test_upgrade_controls_recalculate_visible_recommendations(self):
+        page = self.window.upgrade_page
+        page.coins.setValue(0)
+        self.assertEqual(0, page.table.rowCount())
+        page.coins.setValue(800000)
+        page.max_souls.setValue(1)
+        self.assertEqual(1, page.table.rowCount())
+
     def test_invalid_scheme_does_not_reach_clipboard(self):
         QApplication.clipboard().setText("sentinel")
         with patch("yys_helper.ui.main_window.QMessageBox.warning"):

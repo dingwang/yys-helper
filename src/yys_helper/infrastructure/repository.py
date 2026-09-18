@@ -42,12 +42,15 @@ class AppRepository:
         self.connection.close()
 
     def set_setting(self, key: str, value: str) -> None:
-        self.connection.execute(
-            "INSERT INTO settings(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value),
-        )
-        self.connection.commit()
+        self.set_settings({key: value})
+
+    def set_settings(self, values: dict[str, str]) -> None:
+        with self.connection:
+            self.connection.executemany(
+                "INSERT INTO settings(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                values.items(),
+            )
 
     def get_setting(self, key: str, default: str | None = None) -> str | None:
         row = self.connection.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()

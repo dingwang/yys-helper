@@ -74,6 +74,14 @@ class RepositoryTests(unittest.TestCase):
         self.repo.set_setting("adb_path", "C:/MuMu/adb.exe")
         self.assertEqual("C:/MuMu/adb.exe", self.repo.get_setting("adb_path"))
 
+    def test_bulk_settings_roll_back_on_constraint_failure(self):
+        import sqlite3
+        self.repo.set_setting('task_rounds', '30')
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.repo.set_settings({'task_rounds': '12', 'invalid': None})
+        self.assertEqual('30', self.repo.get_setting('task_rounds'))
+        self.assertIsNone(self.repo.get_setting('invalid'))
+
     def test_appends_audit_events_in_order(self):
         self.repo.add_audit("tap", {"x": 10, "y": 20})
         self.repo.add_audit("stop", {"reason": "cancelled"})

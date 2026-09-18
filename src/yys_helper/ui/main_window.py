@@ -54,9 +54,11 @@ from yys_helper.application.schemes import (
     normalize_scheme_code,
 )
 from yys_helper.automation.engine import AutomationEngine, CancellationToken
-from yys_helper.automation.workflows import chapter_28_workflow, soul_dungeon_workflow
+from yys_helper.automation.catalog import get_task, workflow_for
+from yys_helper.ui.task_center import TaskCenterPage
 from yys_helper.demo import DemoState, create_state
-from yys_helper.domain.models import BuildRequirement, Stat, StopReason, TaskLimits
+from yys_helper.domain.models import BuildRequirement, Stat, StopReason, TaskLimits, UpgradeBudget
+from yys_helper.domain.upgrade import rank_upgrade_candidates
 from yys_helper.domain.safety import protection_reasons
 from yys_helper.domain.scoring import DEFAULT_PROFILES, score_soul
 from yys_helper.infrastructure.adb import AdbClient, AdbError, discover_adb
@@ -105,9 +107,11 @@ def page_title(title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
 
 
 class DashboardPage(QWidget):
+    navigate_requested = Signal(int)
+
     def __init__(self, demo: DemoState) -> None:
         super().__init__()
-        page, layout = page_title("运行总览", "连接 MuMu 后可预览画面并启动安全自动化。")
+        page, layout = page_title("今天，也轻松一点。", "整理御魂，规划配装，让重复的操作更少一些。")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
@@ -130,14 +134,23 @@ class DashboardPage(QWidget):
             metrics.addWidget(frame)
         layout.addLayout(metrics)
 
+        quick_actions = QHBoxLayout()
+        for label, destination in (('整理我的御魂', 2), ('查看配装方案', 1), ('选择挂机玩法', 4)):
+            button = QPushButton(label)
+            if destination == 4:
+                button.setObjectName('primary')
+            button.clicked.connect(lambda _checked=False, page=destination: self.navigate_requested.emit(page))
+            quick_actions.addWidget(button)
+        layout.addLayout(quick_actions)
+
         preview_card, preview_layout = card()
-        caption = QLabel("MuMu 实时画面")
+        caption = QLabel("设备预览 · 连接时截图")
         caption.setStyleSheet("font-weight: 700; font-size: 15px")
         self.preview = QLabel("尚未连接模拟器\n\n点击右上角“连接 MuMu”开始")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(360)
         self.preview.setStyleSheet(
-            "background:#080D19;border:1px dashed #3B4D75;border-radius:10px;color:#7887A6"
+            "background:#F6F8FB;border:1px dashed #D1D9E4;border-radius:12px;color:#8590A1"
         )
         preview_layout.addWidget(caption)
         preview_layout.addWidget(self.preview, 1)
@@ -222,7 +235,7 @@ class SchemePage(QWidget):
         result_layout.addWidget(self.result_caption)
         status = self._status_text(demo)
         self.result = QLabel(status)
-        self.result.setStyleSheet("font-size:18px;font-weight:700;color:#F6C453")
+        self.result.setStyleSheet("font-size:18px;font-weight:700;color:#007AFF")
         result_layout.addWidget(self.result)
         details = []
         for stat, gap in demo.closest_build.shortfalls.items():
@@ -329,8 +342,8 @@ class InventoryPage(QWidget):
         record_controls = QHBoxLayout()
         record_hint = QLabel("选中表格中的记录后，可重新读取覆盖或从本地仓库删除。")
         record_hint.setObjectName("muted")
-        record_controls.addWidget(record_hint)
-        record_controls.addStretch()
+        record_hint.setWordWrap(True)
+        capture_layout.addWidget(record_hint)
         self.import_json = QPushButton("导入库存 JSON")
         self.import_json.clicked.connect(self._choose_inventory)
         record_controls.addWidget(self.import_json)
@@ -349,6 +362,7 @@ class InventoryPage(QWidget):
         self.delete_selected.setObjectName("danger")
         self.delete_selected.clicked.connect(self._emit_delete)
         record_controls.addWidget(self.delete_selected)
+        record_controls.addStretch()
         capture_layout.addLayout(record_controls)
         self.capture_status = QLabel()
         self.capture_status.setObjectName("statusPill")
@@ -360,6 +374,7 @@ class InventoryPage(QWidget):
             ["套装", "位置", "星级", "等级", "主属性", "速度", "输出分", "保护状态"]
         )
         self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
@@ -481,100 +496,46 @@ class UpgradePage(QWidget):
         layout.addWidget(budget_card)
 
         self.table = QTableWidget(0, 6)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setHorizontalHeaderLabels(["优先级", "套装/位置", "当前", "下一检查点", "预计金币", "命中目标"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.populate(demo)
+        self.coins.valueChanged.connect(lambda _: self.populate(self._state))
+        self.max_souls.valueChanged.connect(lambda _: self.populate(self._state))
         layout.addWidget(self.table, 1)
 
     def populate(self, demo: DemoState) -> None:
-        self.table.setRowCount(len(demo.upgrade_candidates))
-        for row, candidate in enumerate(demo.upgrade_candidates):
+        self._state = demo
+        ranked = rank_upgrade_candidates(demo.inventory, demo.requirement, UpgradeBudget(
+            max_coins=self.coins.value(), max_materials=40,
+            max_souls=len(demo.inventory), max_level=15, min_expected_gain=.1))
+        candidates = []
+        remaining = self.coins.value()
+        for candidate in ranked:
+            if candidate.estimated_coins <= remaining and len(candidates) < self.max_souls.value():
+                candidates.append(candidate)
+                remaining -= candidate.estimated_coins
+        self.table.setRowCount(len(candidates))
+        for row, candidate in enumerate(candidates):
             values = (
                 str(row + 1),
                 f"{candidate.soul.set_name} · {candidate.soul.slot}号位",
                 f"+{candidate.soul.level}",
                 f"+{candidate.next_level}",
                 f"{candidate.estimated_coins:,}",
-                " / ".join(candidate.reasons),
+                " / ".join(STAT_LABELS.get(Stat(reason), reason) for reason in candidate.reasons),
             )
             for column, value in enumerate(values):
                 self.table.setItem(row, column, QTableWidgetItem(value))
 
 
-class DailiesPage(QWidget):
-    start_requested = Signal(str, int, int)
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._task_active = False
-        page, layout = page_title(
-            "日常任务", "达到次数/时长上限、体力不足或三次识别失败时自动停止。"
-        )
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(page)
-        settings, settings_layout = card()
-        row = QHBoxLayout()
-        row.addWidget(QLabel("最大循环"))
-        self.rounds = QSpinBox()
-        self.rounds.setRange(1, 500)
-        self.rounds.setValue(30)
-        row.addWidget(self.rounds)
-        row.addWidget(QLabel("最长分钟"))
-        self.minutes = QSpinBox()
-        self.minutes.setRange(1, 720)
-        self.minutes.setValue(60)
-        row.addWidget(self.minutes)
-        row.addStretch()
-        settings_layout.addLayout(row)
-        self.risk_ack = QCheckBox("我理解自动操作可能违反游戏规则并带来账号处罚风险")
-        self.risk_ack.setObjectName("riskCheck")
-        settings_layout.addWidget(self.risk_ack)
-        layout.addWidget(settings)
-
-        choices = QHBoxLayout()
-        self.task_buttons: list[QPushButton] = []
-        for task_id, title, description in (
-            ("chapter28", "困 28 经验", "循环选怪、战斗、结算；首版不自动更换狗粮。"),
-            ("soul", "御魂副本", "循环挑战与结算，保留阵容，不触发付费补充体力。"),
-        ):
-            task_card, inner = card()
-            name = QLabel(title)
-            name.setStyleSheet("font-size:18px;font-weight:700")
-            copy = QLabel(description)
-            copy.setObjectName("muted")
-            copy.setWordWrap(True)
-            button = QPushButton("启动任务")
-            button.setObjectName("primary")
-            button.setEnabled(False)
-            button.clicked.connect(
-                lambda _checked=False, value=task_id: self.start_requested.emit(
-                    value, self.rounds.value(), self.minutes.value()
-                )
-            )
-            inner.addWidget(name)
-            inner.addWidget(copy)
-            inner.addStretch()
-            inner.addWidget(button)
-            self.task_buttons.append(button)
-            choices.addWidget(task_card)
-        self.risk_ack.toggled.connect(self._set_task_buttons_enabled)
-        layout.addLayout(choices)
-        layout.addStretch()
-
-    def _set_task_buttons_enabled(self, enabled: bool) -> None:
-        for button in self.task_buttons:
-            button.setEnabled(enabled and not self._task_active)
-
-    def set_task_active(self, active: bool) -> None:
-        self._task_active = active
-        self._set_task_buttons_enabled(self.risk_ack.isChecked())
 
 
 class TaskWorker(QThread):
     completed = Signal(object)
     failed = Signal(str)
+    progress = Signal(str, int, float)
 
     def __init__(
         self,
@@ -582,26 +543,39 @@ class TaskWorker(QThread):
         mode: str,
         limits: TaskLimits,
         token: CancellationToken,
+        profile=None,
     ):
         super().__init__()
         self.runtime = runtime
         self.mode = mode
         self.limits = limits
         self.token = token
+        self.profile = profile
 
     def run(self) -> None:
         try:
-            workflow = (
-                chapter_28_workflow()
-                if self.mode == "chapter28"
-                else soul_dungeon_workflow()
-            )
-            result = AutomationEngine(self.runtime, self.runtime).run(
+            workflow = workflow_for(self.mode)
+            self.runtime.task_profile = self.profile
+            self._first_observation = True
+            self.progress.emit('starting', 0, 0.)
+            result = AutomationEngine(self, self.runtime, progress=self.progress.emit).run(
                 workflow, self.limits, self.token
             )
             self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
+        finally:
+            self.runtime.task_profile = None
+
+    def observe(self):
+        package = self.runtime.adb.current_package()
+        if not package or 'onmyoji' not in package.lower():
+            raise RuntimeError('游戏已不在前台，已停止。')
+        scene = self.runtime.observe()
+        if self._first_observation and self.profile is not None and scene != 'ready':
+            raise ValueError('启动预检未通过：请进入所选关卡挑战页，并核对标题和挑战按钮。未发送点击。')
+        self._first_observation = False
+        return scene
 
 
 class MainWindow(QMainWindow):
@@ -637,7 +611,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(220)
+        sidebar.setFixedWidth(202)
         nav_layout = QVBoxLayout(sidebar)
         nav_layout.setContentsMargins(18, 22, 18, 18)
         brand_row = QHBoxLayout()
@@ -653,7 +627,7 @@ class MainWindow(QMainWindow):
         brand_copy = QVBoxLayout()
         brand = QLabel("御魂匠")
         brand.setObjectName("brand")
-        tagline = QLabel("LOCAL · READ FIRST")
+        tagline = QLabel("你的平安京工作台")
         tagline.setObjectName("muted")
         brand_copy.addWidget(brand)
         brand_copy.addWidget(tagline)
@@ -668,7 +642,7 @@ class MainWindow(QMainWindow):
         self.scheme_page = SchemePage(demo, demo_mode=demo_mode)
         self.inventory_page = InventoryPage(demo, demo_mode=demo_mode)
         self.upgrade_page = UpgradePage(demo)
-        self.dailies_page = DailiesPage()
+        self.dailies_page = TaskCenterPage(repository)
         pages = [
             ("总览", self.dashboard),
             ("方案配装", self.scheme_page),
@@ -697,11 +671,11 @@ class MainWindow(QMainWindow):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
         header = QFrame()
-        header.setStyleSheet("background:#0E1526;border-bottom:1px solid #24304A")
+        header.setStyleSheet("QFrame{background:#FAFBFD;border-bottom:1px solid #E3E5EA}")
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(22, 12, 22, 12)
         self.connection = QLabel("● 未连接 MuMu" if not demo_mode else "● 演示模式")
-        self.connection.setStyleSheet("color:#F0A95A")
+        self.connection.setStyleSheet("color:#8B7356")
         header_layout.addWidget(self.connection)
         privacy = QLabel("只读采集 · 本地存储")
         privacy.setObjectName("safePill")
@@ -719,13 +693,20 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.stack, 1)
 
         log_frame = QFrame()
-        log_frame.setStyleSheet("background:#0A0F1C;border-top:1px solid #24304A")
+        log_frame.setStyleSheet("QFrame{background:#F5F5F7;border-top:1px solid #E3E5EA}")
         log_layout = QVBoxLayout(log_frame)
         log_layout.setContentsMargins(18, 8, 18, 10)
-        log_layout.addWidget(QLabel("运行日志"))
+        self.log_toggle = QPushButton('运行记录  ›')
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.setStyleSheet('text-align:left;border:none;color:#727681;font-weight:400;padding:2px')
+        log_layout.addWidget(self.log_toggle)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumHeight(110)
+        self.log.setMaximumBlockCount(500)
+        self.log.hide()
+        self.log_toggle.toggled.connect(self.log.setVisible)
+        self.log_toggle.toggled.connect(lambda opened: self.log_toggle.setText('运行记录  ﹀' if opened else '运行记录  ›'))
         log_layout.addWidget(self.log)
         content_layout.addWidget(log_frame)
         root_layout.addWidget(content, 1)
@@ -744,6 +725,9 @@ class MainWindow(QMainWindow):
             self.open_diagnostics_directory
         )
         self.dailies_page.start_requested.connect(self.start_task)
+        self.dashboard.navigate_requested.connect(self._navigate)
+        for index in range(5):
+            QShortcut(QKeySequence(f'Ctrl+{index + 1}'), self, activated=lambda value=index: self._navigate(value))
         if demo_mode:
             self.add_log("助手已启动；当前为演示库存，不会向 MuMu 发送输入。")
         elif demo.inventory:
@@ -846,7 +830,7 @@ class MainWindow(QMainWindow):
             if self.repository is not None:
                 self.repository.set_setting("adb_path", candidates[0])
             self.connection.setText(f"● 已连接 {preferred}")
-            self.connection.setStyleSheet("color:#65D6A0")
+            self.connection.setStyleSheet("color:#29805A")
             self.add_log(f"已连接 MuMu 设备 {preferred}，截图校验成功。")
         except Exception as exc:
             QMessageBox.warning(self, "连接失败", str(exc))
@@ -900,18 +884,30 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "游戏未在前台", message)
             self.add_log(message)
             return
+        try:
+            task = get_task(mode)
+            profile = self.dailies_page.current_profile() if task.profile else None
+            if task.profile and self.dailies_page.selected_task.id != mode:
+                raise ValueError('任务与识别配置不一致，请重新选择玩法。')
+            if profile and '请填写' in ''.join(profile.title):
+                raise ValueError('请先填写本期关卡标题，并导入截图预检。')
+        except ValueError as exc:
+            QMessageBox.information(self, '请检查任务配置', str(exc))
+            return
         self.cancel_token = CancellationToken()
         limits = TaskLimits(max_rounds=rounds, max_duration_seconds=minutes * 60)
-        self.worker = TaskWorker(self.runtime, mode, limits, self.cancel_token)
+        self.worker = TaskWorker(self.runtime, mode, limits, self.cancel_token, profile)
+        self.worker.progress.connect(self.dailies_page.update_progress)
         self.worker.completed.connect(self._task_completed)
         self.worker.failed.connect(self._task_failed)
+        self.worker.finished.connect(lambda: self._set_task_active(False))
         self._set_task_active(True)
         try:
             self.worker.start()
         except Exception:
             self._set_task_active(False)
             raise
-        label = "困28" if mode == "chapter28" else "御魂副本"
+        label = task.title
         self.add_log(f"已启动{label}：最多 {rounds} 轮 / {minutes} 分钟。")
 
     def stop_task(self) -> None:
@@ -920,9 +916,16 @@ class MainWindow(QMainWindow):
 
     def _task_completed(self, result) -> None:
         self._set_task_active(False)
+        self.dailies_page.update_progress(result.final_state, result.rounds, result.elapsed_seconds)
+        reasons = {StopReason.MAX_ROUNDS: '已达到轮数上限', StopReason.MAX_DURATION: '已达到时长上限',
+                   StopReason.CANCELLED: '已停止', StopReason.UNRECOGNIZED_SCENE: '画面未识别，已停止',
+                   StopReason.INSUFFICIENT_STAMINA: '体力不足，已停止', StopReason.ACTION_FAILED: '操作条件不满足',
+                   StopReason.ADB_DISCONNECTED: '设备或识别异常', StopReason.NETWORK_ERROR: '连接异常',
+                   StopReason.INVENTORY_FULL: '仓库已满', StopReason.COMPLETED: '已完成'}
+        self.dailies_page.status.setText(f'{reasons.get(result.reason, result.reason.value)} · 完成 {result.rounds} 轮\n{result.message}')
         evidence_note = ""
         if (
-            result.reason == StopReason.UNRECOGNIZED_SCENE
+            result.reason in (StopReason.UNRECOGNIZED_SCENE, StopReason.ACTION_FAILED, StopReason.ADB_DISCONNECTED)
             and self.runtime is not None
             and self.runtime.last_capture_png is not None
         ):
@@ -939,11 +942,12 @@ class MainWindow(QMainWindow):
                 evidence_note = f"；诊断：{evidence_path}"
         self.add_log(
             f"任务停止：{result.reason.value}，完成 {result.rounds} 轮，"
-            f"最终场景 {result.final_state}{evidence_note}。"
+            f"最终场景 {result.final_state}{evidence_note}。{result.message}"
         )
 
     def _task_failed(self, message: str) -> None:
         self._set_task_active(False)
+        self.dailies_page.status.setText(f'已停止 · {message}')
         evidence_note = ""
         if (
             self.runtime is not None
@@ -959,6 +963,15 @@ class MainWindow(QMainWindow):
             if evidence_path is not None:
                 evidence_note = f"；诊断：{evidence_path}"
         self.add_log(f"任务异常：{message}{evidence_note}")
+
+    def closeEvent(self, event) -> None:
+        checking = self.dailies_page.check_worker
+        if self._task_running() or (checking and checking.isRunning()):
+            self.cancel_token.cancel()
+            self.add_log('正在停止或完成识别，请稍后再次关闭窗口。')
+            event.ignore()
+            return
+        event.accept()
 
     def refresh_state(self, state: DemoState) -> None:
         self.demo = state

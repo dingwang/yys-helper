@@ -9,6 +9,7 @@ from PIL import Image
 
 from yys_helper.infrastructure.adb import AdbClient
 from yys_helper.infrastructure.vision import OcrBox, VisionService
+from yys_helper.automation.catalog import TaskProfile
 
 
 class CaptureError(RuntimeError):
@@ -71,6 +72,35 @@ def classify_scene(boxes: Iterable[OcrBox], min_confidence: float = 0.92) -> str
     return None
 
 
+def classify_task_scene(boxes: Iterable[OcrBox], profile: TaskProfile) -> str | None:
+    boxes = tuple(boxes)
+    texts = [box.text.strip() for box in boxes if box.confidence >= .92]
+    common = classify_scene(boxes)
+    if common in ('stamina_empty', 'network_error', 'inventory_full', 'login'):
+        return common
+    if _contains(texts, '不足', '不够', '已耗尽', '次数用尽'):
+        return 'resource_empty'
+    if _contains(texts, '战斗失败', '挑战失败'):
+        return 'defeat'
+    if _contains(texts, '购买', '充值', '勾玉兑换'):
+        return 'purchase'
+    if common == 'battle':
+        return 'battle'
+    if any(word in texts for word in profile.repeat):
+        return 'repeat'
+    if _contains(texts, *profile.settlement):
+        return 'settlement'
+    if any(word in texts for word in profile.prepare):
+        return 'prepare'
+    starts = [box for box in boxes if box.confidence >= .92 and box.text.strip() in profile.start]
+    anchors = [box for box in boxes if box.confidence >= .92
+               and any(title in box.text for title in profile.title)
+               and box.text.strip() not in profile.start]
+    if anchors and len(starts) == 1:
+        return 'ready'
+    return None
+
+
 class OcrMumuRuntime:
     """Scene observer and text-only actor with no coordinate fallbacks."""
 
@@ -88,6 +118,7 @@ class OcrMumuRuntime:
         self.last_boxes: list[OcrBox] = []
         self.last_capture_error: str | None = None
         self._io_lock = RLock()
+        self.task_profile: TaskProfile | None = None
 
     def _capture_with_png(self) -> tuple[bytes, Image.Image, list[OcrBox]]:
         png = self.adb.screenshot()
@@ -136,11 +167,23 @@ class OcrMumuRuntime:
                 self.last_boxes = list(exc.boxes)
                 self.last_capture_error = str(exc)
                 raise
+            if self.task_profile is not None:
+                return classify_task_scene(self.last_boxes, self.task_profile)
             return classify_scene(self.last_boxes)
 
     def perform(self, action: str) -> bool:
         with self._io_lock:
             if action == "wait_battle":
+                return True
+            if action.startswith('task_') and self.task_profile is not None:
+                key = action.removeprefix('task_')
+                labels = getattr(self.task_profile, key, ())
+                candidates = [box for box in self.last_boxes
+                              if box.text.strip() in labels and box.confidence >= .92]
+                # Ambiguous buttons need a better profile, never a guessed tap.
+                if len(candidates) != 1:
+                    return False
+                self.adb.tap(*candidates[0].center)
                 return True
             labels = resolve_action_text(action)
             if action == "select_chapter_28_hard":
